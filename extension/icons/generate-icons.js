@@ -55,14 +55,21 @@ try {
   
   const sizes = [16, 48, 128];
   
-  sizes.forEach(size => {
-    sharp(Buffer.from(svgIcon))
-      .resize(size, size)
-      .png()
-      .toFile(`icon-${size}.png`)
-      .then(() => console.log(`Generated icon-${size}.png`))
-      .catch(err => console.log(`Could not generate PNG: ${err.message}`));
-  });
+  async function generateIcons() {
+    for (const size of sizes) {
+      try {
+        await sharp(Buffer.from(svgIcon))
+          .resize(size, size)
+          .png()
+          .toFile(`icon-${size}.png`);
+        console.log(`Generated icon-${size}.png`);
+      } catch (err) {
+        console.log(`Could not generate icon-${size}.png: ${err.message}`);
+      }
+    }
+  }
+  
+  generateIcons();
   
 } catch (err) {
   console.log('Sharp not installed. Manual PNG conversion needed.');
