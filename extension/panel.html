@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>MCP Bridge Panel</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      margin: 0;
+      padding: 16px;
+      background: #f5f5f5;
+    }
+    
+    .status-bar {
+      background: white;
+      padding: 12px;
+      border-radius: 6px;
+      margin-bottom: 16px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    
+    .status-indicator {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      margin-right: 8px;
+    }
+    
+    .connected { background: #4CAF50; }
+    .disconnected { background: #f44336; }
+    
+    .data-section {
+      background: white;
+      border-radius: 6px;
+      margin-bottom: 16px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    
+    .section-header {
+      padding: 12px 16px;
+      border-bottom: 1px solid #eee;
+      font-weight: 600;
+      background: #fafafa;
+      border-radius: 6px 6px 0 0;
+    }
+    
+    .section-content {
+      padding: 16px;
+      max-height: 300px;
+      overflow-y: auto;
+    }
+    
+    .data-item {
+      margin-bottom: 8px;
+      padding: 8px;
+      background: #f9f9f9;
+      border-radius: 4px;
+      font-family: monospace;
+      font-size: 12px;
+    }
+    
+    .button {
+      background: #007cba;
+      color: white;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 4px;
+      cursor: pointer;
+      margin-right: 8px;
+      margin-bottom: 8px;
+    }
+    
+    .button:hover {
+      background: #005a87;
+    }
+    
+    .button:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+    }
+    
+    pre {
+      white-space: pre-wrap;
+      word-break: break-all;
+      margin: 0;
+    }
+    
+    .error {
+      color: #f44336;
+      background: #ffebee;
+      padding: 8px;
+      border-radius: 4px;
+      margin-bottom: 8px;
+    }
+    
+    .success {
+      color: #4CAF50;
+      background: #e8f5e8;
+      padding: 8px;
+      border-radius: 4px;
+      margin-bottom: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div class="status-bar">
+    <span id="status-indicator" class="status-indicator disconnected"></span>
+    <span id="status-text">Disconnected from MCP Server</span>
+    <button id="reconnect-btn" class="button">Reconnect</button>
+  </div>
+
+  <div class="data-section">
+    <div class="section-header">Quick Actions</div>
+    <div class="section-content">
+      <button id="capture-page" class="button">Capture Page Data</button>
+      <button id="capture-dom" class="button">Capture DOM</button>
+      <button id="capture-console" class="button">Capture Console</button>
+      <button id="capture-network" class="button">Capture Network</button>
+      <button id="capture-performance" class="button">Capture Performance</button>
+      <button id="capture-screenshot" class="button">Take Screenshot</button>
+      <button id="clear-data" class="button">Clear Data</button>
+    </div>
+  </div>
+
+  <div class="data-section">
+    <div class="section-header">MCP Server Communication</div>
+    <div class="section-content">
+      <div id="mcp-messages"></div>
+    </div>
+  </div>
+
+  <div class="data-section">
+    <div class="section-header">Page Information</div>
+    <div class="section-content">
+      <div id="page-info">
+        <div class="data-item">URL: <span id="page-url">-</span></div>
+        <div class="data-item">Title: <span id="page-title">-</span></div>
+        <div class="data-item">Last Updated: <span id="last-updated">-</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="data-section">
+    <div class="section-header">Console Messages</div>
+    <div class="section-content">
+      <div id="console-messages">No console messages captured</div>
+    </div>
+  </div>
+
+  <div class="data-section">
+    <div class="section-header">Network Activity</div>
+    <div class="section-content">
+      <div id="network-activity">No network activity captured</div>
+    </div>
+  </div>
+
+  <script src="panel.js"></script>
+</body>
+</html>

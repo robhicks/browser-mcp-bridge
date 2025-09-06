@@ -1,0 +1,44 @@
+{
+  "name": "browser-mcp-bridge",
+  "version": "1.0.0",
+  "description": "Browser extension and MCP server bridge for Claude Code integration",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "cd server && npm start",
+    "dev": "cd server && npm run dev",
+    "install-server": "cd server && npm install",
+    "install-all": "npm run install-server",
+    "test": "echo 'Tests not yet implemented'",
+    "build": "echo 'Build process for extension packaging'",
+    "clean": "rm -rf server/node_modules",
+    "health-check": "curl http://localhost:3000/health || echo 'Server not running'"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-username/browser-mcp-bridge.git"
+  },
+  "keywords": [
+    "browser",
+    "extension",
+    "mcp",
+    "claude-code",
+    "devtools",
+    "automation",
+    "web-scraping"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/your-username/browser-mcp-bridge/issues"
+  },
+  "homepage": "https://github.com/your-username/browser-mcp-bridge#readme",
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=8.0.0"
+  },
+  "directories": {
+    "server": "./server",
+    "extension": "./extension",
+    "docs": "./docs"
+  }
+}
