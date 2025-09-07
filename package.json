@@ -40,5 +40,8 @@
     "server": "./server",
     "extension": "./extension",
     "docs": "./docs"
+  },
+  "dependencies": {
+    "sharp": "^0.34.3"
   }
 }
