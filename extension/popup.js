@@ -59,7 +59,7 @@ class PopupController {
     
     switch (message.type) {
       case 'status':
-        this.updateConnectionStatus(message.connected, message.url);
+        this.updateConnectionStatus(message.connected, message.url, message.reconnecting);
         break;
       
       case 'stats':
@@ -109,22 +109,30 @@ class PopupController {
     }
   }
 
-  updateConnectionStatus(connected, serverUrl) {
+  updateConnectionStatus(connected, serverUrl, reconnecting = false) {
     this.isConnected = connected;
     
     const statusEl = document.getElementById('connection-status');
     const connectBtn = document.getElementById('connect-btn');
     const captureBtn = document.getElementById('capture-current');
     
-    if (connected) {
+    if (reconnecting) {
+      statusEl.className = 'status reconnecting';
+      statusEl.textContent = 'Reconnecting to MCP Server...';
+      connectBtn.textContent = 'Reconnecting...';
+      connectBtn.disabled = true;
+      captureBtn.disabled = true;
+    } else if (connected) {
       statusEl.className = 'status connected';
       statusEl.textContent = `Connected to ${serverUrl || 'MCP Server'}`;
       connectBtn.textContent = 'Disconnect';
+      connectBtn.disabled = false;
       captureBtn.disabled = false;
     } else {
       statusEl.className = 'status disconnected';
       statusEl.textContent = 'Disconnected from MCP Server';
       connectBtn.textContent = 'Connect to Server';
+      connectBtn.disabled = false;
       captureBtn.disabled = true;
     }
   }

@@ -324,12 +324,14 @@ class BrowserMCPServer {
       res.json({
         status: 'ok',
         connections: this.browserConnections.size,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        port: this.port
       });
     });
     
-    this.httpServer = app.listen(3000, () => {
-      console.error('MCP Bridge server listening on port 3000');
+    this.port = process.env.MCP_SERVER_PORT || 6009;
+    this.httpServer = app.listen(this.port, () => {
+      console.error(`MCP Bridge server listening on port ${this.port}`);
     });
     
     this.wsServer = new WebSocketServer({ 

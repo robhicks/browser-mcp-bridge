@@ -11,7 +11,7 @@ This is a **Browser MCP Bridge** - a two-part system that connects browser exten
 
 ### Core Communication Flow
 - Extension captures browser data via content scripts, background workers, and DevTools APIs
-- WebSocket connection (port 3000) bridges extension and MCP server 
+- WebSocket connection (port 6009) bridges extension and MCP server 
 - MCP server exposes tools to Claude Code via stdio transport
 - Multi-tab support with tabId-based tool targeting
 
@@ -52,13 +52,16 @@ npm run dev
 # Start MCP server in production mode  
 npm start
 # or: cd server && npm start
+
+# Use custom port (default: 6009)
+MCP_SERVER_PORT=8080 npm start
 ```
 
 **Testing and Verification:**
 ```bash
 # Check server health
 npm run health-check
-# or: curl http://localhost:3000/health
+# or: curl http://localhost:6009/health
 
 # Server logs and debugging
 DEBUG=* npm start
@@ -85,12 +88,34 @@ The server must be added to Claude Code's MCP configuration:
       "command": "node",
       "args": ["/path/to/browser-mcp/server/index.js"],
       "env": {
-        "NODE_ENV": "production"
+        "NODE_ENV": "production",
+        "MCP_SERVER_PORT": "6009"
       }
     }
   }
 }
 ```
+
+## Port Configuration
+
+The server runs on port 6009 by default, but this can be customized:
+
+**Server Side:**
+- Set the `MCP_SERVER_PORT` environment variable to use a different port
+- Example: `MCP_SERVER_PORT=8080 npm start` to run on port 8080
+
+**Extension Side:**
+- The extension automatically connects to `ws://localhost:6009/mcp` by default
+- Users can change the WebSocket URL in the extension popup to match their server configuration
+- The extension saves the custom URL for future connections
+
+**Changing the Port:**
+1. Start server with custom port: `MCP_SERVER_PORT=8080 npm start`
+2. Open the browser extension popup
+3. Update the "WebSocket URL" field to `ws://localhost:8080/mcp`
+4. Click "Connect to Server"
+
+The extension will remember the custom URL for future sessions.
 
 ## Development Workflow
 

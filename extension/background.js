@@ -3,26 +3,57 @@
 class MCPBridge {
   constructor() {
     this.ws = null;
-    this.wsUrl = 'ws://localhost:3000/mcp';
+    this.wsUrl = 'ws://localhost:6009/mcp'; // Default fallback
     this.reconnectInterval = 5000;
     this.activeTab = null;
     this.debuggerAttached = new Set();
+    this.isReconnecting = false;
+    this.popupPorts = new Set();
+    this.reconnectTimer = null;
+    this.minReconnectDisplayTime = 2000; // Show reconnecting state for at least 2 seconds
     
-    this.initializeConnection();
+    this.loadConfiguration().then(() => {
+      this.initializeConnection();
+    });
     this.setupMessageHandlers();
     this.setupDebugger();
+  }
+
+  async loadConfiguration() {
+    return new Promise((resolve) => {
+      chrome.storage.sync.get(['serverUrl'], (result) => {
+        if (result.serverUrl) {
+          this.wsUrl = result.serverUrl;
+        }
+        resolve();
+      });
+    });
   }
 
   initializeConnection() {
     this.connect();
   }
 
-  connect() {
+  connect(isReconnectAttempt = false) {
     try {
+      // Clear any existing reconnect timer
+      if (this.reconnectTimer) {
+        clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = null;
+      }
+      
+      // Only set reconnecting state if this is actually a reconnection attempt
+      if (isReconnectAttempt) {
+        this.isReconnecting = true;
+        this.broadcastStatus();
+      }
+      
       this.ws = new WebSocket(this.wsUrl);
       
       this.ws.onopen = () => {
         console.log('Connected to MCP server');
+        this.isReconnecting = false;
+        this.broadcastStatus();
         this.sendToMCP({
           type: 'connection',
           status: 'connected',
@@ -36,15 +67,16 @@ class MCPBridge {
 
       this.ws.onerror = (error) => {
         console.error('WebSocket error:', error);
+        // Don't immediately clear reconnecting state - let scheduleReconnect handle it
       };
 
       this.ws.onclose = () => {
         console.log('Disconnected from MCP server');
-        setTimeout(() => this.connect(), this.reconnectInterval);
+        this.scheduleReconnect();
       };
     } catch (error) {
       console.error('Failed to connect:', error);
-      setTimeout(() => this.connect(), this.reconnectInterval);
+      this.scheduleReconnect();
     }
   }
 
@@ -54,6 +86,43 @@ class MCPBridge {
     } else {
       console.warn('WebSocket not connected');
     }
+  }
+
+  scheduleReconnect() {
+    // First show disconnected state
+    this.isReconnecting = false;
+    this.broadcastStatus();
+    
+    // Schedule reconnect attempt after a delay
+    this.reconnectTimer = setTimeout(() => {
+      // Show reconnecting state briefly during actual reconnect attempt
+      this.isReconnecting = true;
+      this.broadcastStatus();
+      
+      // Small delay to ensure reconnecting state is visible, then attempt connection
+      setTimeout(() => {
+        this.connect(true); // Pass true to indicate this is a reconnection attempt
+      }, 500); // Show "Reconnecting..." for 500ms
+    }, this.reconnectInterval); // Wait 5 seconds before attempting reconnect
+  }
+
+  broadcastStatus() {
+    // Broadcast status to all connected popup ports
+    const statusMessage = {
+      type: 'status',
+      connected: this.ws?.readyState === WebSocket.OPEN,
+      reconnecting: this.isReconnecting,
+      url: this.wsUrl
+    };
+    
+    this.popupPorts.forEach(port => {
+      try {
+        port.postMessage(statusMessage);
+      } catch (error) {
+        // Remove disconnected ports
+        this.popupPorts.delete(port);
+      }
+    });
   }
 
   setupMessageHandlers() {
@@ -74,12 +143,52 @@ class MCPBridge {
     // Handle messages from popup
     chrome.runtime.onConnect.addListener((port) => {
       if (port.name === 'popup') {
+        // Track popup port for status broadcasts
+        this.popupPorts.add(port);
+        
+        // Clean up when popup disconnects
+        port.onDisconnect.addListener(() => {
+          this.popupPorts.delete(port);
+        });
+        
         port.onMessage.addListener((msg) => {
-          if (msg.action === 'getStatus') {
-            port.postMessage({
-              connected: this.ws?.readyState === WebSocket.OPEN,
-              url: this.wsUrl
-            });
+          switch (msg.action) {
+            case 'getStatus':
+              port.postMessage({
+                type: 'status',
+                connected: this.ws?.readyState === WebSocket.OPEN,
+                reconnecting: this.isReconnecting,
+                url: this.wsUrl
+              });
+              break;
+            
+            case 'connect':
+              if (msg.url) {
+                this.wsUrl = msg.url;
+                // Save the new URL to storage
+                chrome.storage.sync.set({ serverUrl: msg.url });
+              }
+              this.connect();
+              break;
+            
+            case 'disconnect':
+              // Clear reconnecting state and timers
+              this.isReconnecting = false;
+              if (this.reconnectTimer) {
+                clearTimeout(this.reconnectTimer);
+                this.reconnectTimer = null;
+              }
+              if (this.ws) {
+                this.ws.close();
+              }
+              this.broadcastStatus();
+              break;
+            
+            case 'captureTab':
+              if (msg.tabId) {
+                this.captureTabData(msg.tabId);
+              }
+              break;
           }
         });
       }
@@ -542,6 +651,20 @@ class MCPBridge {
         action: 'getAllTabs',
         error: error.message
       });
+    }
+  }
+
+  async captureTabData(tabId) {
+    try {
+      // Capture multiple types of data for the tab
+      await Promise.all([
+        this.getPageContent(tabId),
+        this.getDOMSnapshot(tabId),
+        this.getConsoleMessages(tabId),
+        this.getPerformanceMetrics(tabId)
+      ]);
+    } catch (error) {
+      console.error('Error capturing tab data:', error);
     }
   }
 
