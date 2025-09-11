@@ -3,7 +3,7 @@
 class MCPBridge {
   constructor() {
     this.ws = null;
-    this.wsUrl = 'ws://localhost:6009/mcp'; // Default fallback
+    this.wsUrl = 'ws://localhost:6009/ws'; // Default fallback
     this.reconnectInterval = 5000;
     this.activeTab = null;
     this.debuggerAttached = new Set();
