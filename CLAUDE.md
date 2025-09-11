@@ -7,12 +7,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 This is a **Browser MCP Bridge** - a two-part system that connects browser extension data with Claude Code through the Model Context Protocol (MCP):
 
 1. **Browser Extension** (`extension/` directory) - Chrome extension that captures browser data, DOM snapshots, console messages, network activity, and developer tools information
-2. **MCP Server** (`server/` directory) - Node.js server that exposes browser data to Claude Code through 11 specialized MCP tools and dynamic resources
+2. **HTTP MCP Server** (`server/` directory) - Node.js server that exposes browser data to Claude Code through 11 specialized MCP tools and dynamic resources
 
 ### Core Communication Flow
 - Extension captures browser data via content scripts, background workers, and DevTools APIs
 - WebSocket connection (port 6009) bridges extension and MCP server 
-- MCP server exposes tools to Claude Code via stdio transport
+- **HTTP MCP Server** allows multiple Claude Code instances to connect to the same server
 - Multi-tab support with tabId-based tool targeting
 
 ### Key Components
@@ -26,7 +26,9 @@ This is a **Browser MCP Bridge** - a two-part system that connects browser exten
 - `popup.html/js` - Extension popup for connection management
 
 **Server Architecture:**
-- `index.js` - Main MCP server with WebSocket server and Express HTTP server
+- `server.js` - HTTP MCP server with WebSocket server for browser connections
+- **HTTP Transport**: Multiple Claude Code instances can connect to the same server
+- **WebSocket Transport**: Browser extensions connect via WebSocket to `/ws`
 - Implements 11 MCP tools: `get_page_content`, `get_dom_snapshot`, `execute_javascript`, `get_console_messages`, `get_network_requests`, `capture_screenshot`, `get_performance_metrics`, `get_accessibility_tree`, `get_browser_tabs`, `attach_debugger`, `detach_debugger`
 - Dynamic resources for real-time browser data access
 - Connection management for multiple browser tabs
@@ -57,6 +59,49 @@ npm start
 MCP_SERVER_PORT=8080 npm start
 ```
 
+**Production with PM2:**
+```bash
+# Install PM2 globally
+npm install -g pm2
+
+# Start server with PM2
+cd server && pm2 start server.js --name browser-mcp-server
+
+# Start with custom port
+cd server && pm2 start server.js --name browser-mcp-server --env MCP_SERVER_PORT=8080
+
+# PM2 management commands
+pm2 status                    # Check server status
+pm2 logs browser-mcp-server  # View server logs
+pm2 restart browser-mcp-server # Restart server
+pm2 stop browser-mcp-server   # Stop server
+pm2 delete browser-mcp-server # Remove from PM2
+
+# Auto-start on system boot
+pm2 startup
+pm2 save
+
+# Using PM2 ecosystem file (optional)
+# Create ecosystem.config.js:
+# module.exports = {
+#   apps: [{
+#     name: 'browser-mcp-server',
+#     script: 'server.js',
+#     env: {
+#       MCP_SERVER_PORT: 6009,
+#       NODE_ENV: 'production'
+#     },
+#     instances: 1,
+#     autorestart: true,
+#     watch: false,
+#     max_memory_restart: '1G'
+#   }]
+# };
+
+# Start with ecosystem file
+pm2 start ecosystem.config.js
+```
+
 **Testing and Verification:**
 ```bash
 # Check server health
@@ -79,43 +124,83 @@ npm run clean
 
 ## MCP Server Configuration
 
-The server must be added to Claude Code's MCP configuration:
+**HTTP MCP Server**: The server uses HTTP transport, allowing multiple Claude Code instances to connect to the same server process.
 
+### For Claude Code (Recommended)
+```bash
+# Add HTTP MCP server via Claude Code CLI
+claude mcp add --scope user --transport http browser-mcp http://127.0.0.1:6009/mcp
+
+# Verify configuration
+claude mcp list
+
+# Remove if needed
+claude mcp remove browser-mcp
+```
+
+### For Other MCP Clients
+```json
+{
+  "mcpServers": {
+    "browser-mcp": {
+      "url": "http://localhost:6009/mcp"
+    }
+  }
+}
+```
+
+### Standalone Process (Any MCP Client)
 ```json
 {
   "mcpServers": {
     "browser-mcp": {
       "command": "node",
-      "args": ["/path/to/browser-mcp/server/index.js"],
+      "args": ["/path/to/browser-mcp/server/server.js"],
       "env": {
-        "NODE_ENV": "production",
-        "MCP_SERVER_PORT": "6009"
+        "NODE_ENV": "production"
       }
     }
   }
 }
 ```
 
-## Port Configuration
+**Benefits of HTTP Transport:**
+- **Single Server Instance**: One server handles all Claude Code sessions
+- **No Port Conflicts**: Multiple connections to the same endpoint  
+- **Better Performance**: Shared server resources and connections
+- **Service Discovery**: Known endpoint eliminates port conflicts
 
-The server runs on port 6009 by default, but this can be customized:
+## Port Configuration and HTTP Server
 
-**Server Side:**
-- Set the `MCP_SERVER_PORT` environment variable to use a different port
-- Example: `MCP_SERVER_PORT=8080 npm start` to run on port 8080
+**HTTP MCP Server Benefits:**
+- **Single Server Instance**: One server handles all Claude Code sessions 
+- **Fixed Port**: Always runs on port 6009 (or `MCP_SERVER_PORT` if configured)
+- **No Port Conflicts**: Multiple Claude Code instances connect to the same server
+- **Service Discovery**: Extensions know exactly where to connect
 
-**Extension Side:**
-- The extension automatically connects to `ws://localhost:6009/mcp` by default
-- Users can change the WebSocket URL in the extension popup to match their server configuration
-- The extension saves the custom URL for future connections
+**Server Configuration:**
+```bash
+# Default port 6009
+npm start
 
-**Changing the Port:**
-1. Start server with custom port: `MCP_SERVER_PORT=8080 npm start`
-2. Open the browser extension popup
-3. Update the "WebSocket URL" field to `ws://localhost:8080/mcp`
-4. Click "Connect to Server"
+# Custom port
+MCP_SERVER_PORT=8080 npm start
 
-The extension will remember the custom URL for future sessions.
+# With PM2
+pm2 start server.js --name browser-mcp-server --env MCP_SERVER_PORT=8080
+```
+
+**Extension Connection:**
+- Browser extension connects to WebSocket: `ws://localhost:6009/ws`
+- Claude Code connects to HTTP: `http://localhost:6009/mcp`
+- If using custom port, update extension popup with new WebSocket URL
+- Extensions can save custom URLs for future connections
+
+**Multiple Claude Code Sessions:**
+- All instances connect to the same HTTP server
+- No port conflicts or discovery issues
+- Shared server resources and browser connections
+- Consistent performance across sessions
 
 ## Development Workflow
 
@@ -126,11 +211,13 @@ The extension will remember the custom URL for future sessions.
 
 ## Architecture Notes
 
-- **Security:** Localhost-only server, minimal extension permissions requested
-- **Performance:** Efficient WebSocket messaging with structured data format  
+- **HTTP Transport:** Modern MCP server supporting multiple simultaneous Claude Code connections
+- **Single Server Instance:** One process serves all clients, eliminating port conflicts
+- **Security:** Localhost-only server, minimal extension permissions requested  
+- **Performance:** Efficient HTTP MCP protocol with WebSocket browser connections
 - **Extensibility:** Tool definitions and handlers clearly separated for easy expansion
 - **Multi-tab:** All tools support optional `tabId` parameter for tab-specific operations
-- **Error Handling:** Comprehensive error responses in WebSocket message format
+- **Error Handling:** Comprehensive JSON-RPC error responses with detailed debugging
 
 ## Environment Requirements
 
