@@ -40,6 +40,13 @@
       font-size: 12px;
     }
     
+    .version {
+      color: #999;
+      font-size: 10px;
+      margin-top: 4px;
+      font-family: monospace;
+    }
+    
     .status {
       padding: 12px;
       border-radius: 6px;
@@ -170,8 +177,9 @@
 <body>
   <div class="header">
     <div class="logo">MCP</div>
-    <div class="title">Browser MCP Bridge</div>
+    <div class="title">Browser MCP Bridge - UPDATED</div>
     <div class="subtitle">Connect your browser to Claude Code</div>
+    <div id="version" class="version">Loading...</div>
   </div>
 
   <div id="connection-status" class="status disconnected">

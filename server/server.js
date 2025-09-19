@@ -519,6 +519,13 @@ class BrowserMCPHttpServer {
 						type: "object",
 						properties: {
 							tabId: { type: "number", description: "Browser tab ID" },
+							timeout: { 
+								type: "number", 
+								description: "Timeout in milliseconds (default: 30000, max: 120000)",
+								default: 30000,
+								minimum: 5000,
+								maximum: 120000
+							},
 						},
 					},
 				},
@@ -688,7 +695,7 @@ class BrowserMCPHttpServer {
 				return await this.getPerformanceMetrics(args?.tabId);
 
 			case "get_accessibility_tree":
-				return await this.getAccessibilityTree(args?.tabId);
+				return await this.getAccessibilityTree(args?.tabId, args?.timeout);
 
 			case "get_browser_tabs":
 				return await this.getBrowserTabs();
@@ -805,11 +812,22 @@ class BrowserMCPHttpServer {
 			}
 		});
 
+		// Add cleanup endpoint for debugging connection issues
+		app.post('/cleanup-connections', (req, res) => {
+			console.log('Manual connection cleanup requested');
+			this.cleanupStaleConnections();
+			res.json({ 
+				message: 'Connection cleanup completed',
+				activeConnections: this.browserConnections.size 
+			});
+		});
+
 		// Start HTTP server
 		this.httpServer = app.listen(this.port, () => {
 			console.error(`MCP HTTP server listening on port ${this.port}`);
 			console.error(`MCP endpoint: http://localhost:${this.port}/mcp`);
 			console.error(`WebSocket endpoint: ws://localhost:${this.port}/ws`);
+			console.error(`Connection cleanup: POST http://localhost:${this.port}/cleanup-connections`);
 		});
 
 		// Set up WebSocket server for browser extension connections
@@ -848,6 +866,11 @@ class BrowserMCPHttpServer {
 				console.error(`WebSocket error for ${connectionId}:`, error);
 			});
 		});
+
+		// Periodic cleanup of stale connections every 30 seconds  
+		setInterval(() => {
+			this.cleanupStaleConnections();
+		}, 30000);
 	}
 
 	handleBrowserMessage(connectionId, message) {
@@ -855,8 +878,32 @@ class BrowserMCPHttpServer {
 		if (!connection) return;
 
 		connection.lastActivity = new Date();
+		
+		// Debug logging to see exactly what message we're receiving
+		console.error(`[DEBUG] Received message from ${connectionId}:`, JSON.stringify(message, null, 2));
+		console.error(`[DEBUG] Message type: "${message.type}" (type: ${typeof message.type})`);
+
+		// Handle connection messages with more flexible matching
+		if (message.type === "connection" || (message.type && message.type.toLowerCase().includes("connection"))) {
+			console.error(`Browser extension connection established: ${connectionId}`);
+			return;
+		}
 
 		switch (message.type) {
+			case "connection":
+				console.error(`Browser extension connection established: ${connectionId}`);
+				break;
+
+			case "ping":
+				// Respond to health check ping with pong
+				console.error(`[HEALTH] Received ping from ${connectionId}, sending pong`);
+				this.sendDirectMessageToBrowser(connectionId, {
+					type: 'pong',
+					timestamp: Date.now(),
+					originalTimestamp: message.timestamp
+				});
+				break;
+
 			case "browser-data":
 				this.storeBrowserData(connectionId, message);
 				break;
@@ -943,69 +990,174 @@ class BrowserMCPHttpServer {
 		console.error(`Browser error in ${connectionId}:`, message.error);
 	}
 
+	cleanupStaleConnections() {
+		const staleTimeout = 30000; // 30 seconds
+		const now = Date.now();
+		
+		for (const [connectionId, connection] of this.browserConnections) {
+			// Remove connections that are closed or haven't been active recently
+			if (connection.ws.readyState !== 1 || // Not WebSocket.OPEN
+				(now - connection.lastActivity.getTime()) > staleTimeout) {
+				console.log(`Cleaning up stale connection: ${connectionId}`);
+				this.browserConnections.delete(connectionId);
+				this.browserData.delete(connectionId);
+				try {
+					connection.ws.close();
+				} catch (error) {
+					// Ignore close errors for already closed connections
+				}
+			}
+		}
+	}
+
+	// Direct message sending for health checks and notifications
+	sendDirectMessageToBrowser(connectionId, message) {
+		const connection = this.browserConnections.get(connectionId);
+		if (!connection || connection.ws.readyState !== 1) { // WebSocket.OPEN
+			console.error(`[HEALTH] Cannot send message to ${connectionId} - connection not available`);
+			return false;
+		}
+
+		try {
+			connection.ws.send(JSON.stringify(message));
+			console.error(`[HEALTH] Sent direct message to ${connectionId}:`, message.type);
+			return true;
+		} catch (error) {
+			console.error(`[HEALTH] Failed to send direct message to ${connectionId}:`, error);
+			return false;
+		}
+	}
+
 	// MCP Tool implementations
 	async sendToBrowser(action, params = {}) {
+		// Clean up stale connections first
+		this.cleanupStaleConnections();
+		
 		if (this.browserConnections.size === 0) {
 			throw new Error("No browser extensions connected");
 		}
 
-		const connection = Array.from(this.browserConnections.values())[0];
+		// Find the most recent active connection
+		const connections = Array.from(this.browserConnections.values());
+		const connection = connections
+			.filter(conn => conn.ws.readyState === 1) // WebSocket.OPEN
+			.sort((a, b) => b.lastActivity - a.lastActivity)[0];
+		
+		if (!connection) {
+			throw new Error("No healthy browser connections available");
+		}
 
 		return new Promise((resolve, reject) => {
 			const requestId = uuidv4();
+			let isResolved = false;
+			
+			// Configure timeout based on action complexity or custom timeout
+			const getTimeoutForAction = (action, customTimeout) => {
+				// Use custom timeout if provided and within limits
+				if (customTimeout && customTimeout >= 5000 && customTimeout <= 120000) {
+					return customTimeout;
+				}
+				
+				switch (action) {
+					case 'getAccessibilityTree':
+						return 30000; // 30 seconds for accessibility analysis
+					case 'getDOMSnapshot':
+						return 20000; // 20 seconds for complex DOM structures
+					default:
+						return 10000; // 10 seconds for other actions
+				}
+			};
+			
+			const timeoutMs = getTimeoutForAction(action, params.timeout);
+			
+			const cleanup = () => {
+				if (timeout) {
+					clearTimeout(timeout);
+				}
+				connection.ws.off("message", responseHandler);
+			};
+			
 			const timeout = setTimeout(() => {
-				reject(new Error("Browser request timeout"));
-			}, 10000);
+				if (!isResolved) {
+					isResolved = true;
+					cleanup();
+					console.error(`[DEBUG] Request ${requestId} for action ${action} timed out after ${timeoutMs/1000} seconds`);
+					reject(new Error(`Browser request timeout for action: ${action} (${timeoutMs/1000}s)`));
+				}
+			}, timeoutMs);
 
 			const responseHandler = (data) => {
 				try {
 					const message = JSON.parse(data.toString());
 					if (message.type === "response" && message.requestId === requestId) {
-						clearTimeout(timeout);
-						connection.ws.off("message", responseHandler);
-						resolve(message.data);
+						if (!isResolved) {
+							isResolved = true;
+							cleanup();
+							resolve(message.data);
+						}
 					} else if (
 						message.type === "error" &&
 						message.requestId === requestId
 					) {
-						clearTimeout(timeout);
-						connection.ws.off("message", responseHandler);
-						reject(new Error(message.error));
+						if (!isResolved) {
+							isResolved = true;
+							cleanup();
+							reject(new Error(message.error));
+						}
 					}
 				} catch (error) {
 					// Ignore parsing errors for other messages
+					console.error(`[DEBUG] Error parsing response for ${requestId}:`, error);
 				}
 			};
 
+			// Ensure connection is still valid before sending
+			if (connection.ws.readyState !== 1) { // WebSocket.OPEN
+				isResolved = true;
+				cleanup();
+				reject(new Error("WebSocket connection not open"));
+				return;
+			}
+
 			connection.ws.on("message", responseHandler);
-			connection.ws.send(
-				JSON.stringify({
-					action,
-					requestId,
-					...params,
-				}),
-			);
+			
+			try {
+				connection.ws.send(
+					JSON.stringify({
+						action,
+						requestId,
+						...params,
+					}),
+				);
+				console.error(`[DEBUG] Sent request ${requestId} for action ${action}`);
+			} catch (sendError) {
+				if (!isResolved) {
+					isResolved = true;
+					cleanup();
+					reject(new Error(`Failed to send request: ${sendError.message}`));
+				}
+			}
 		});
 	}
 
 	async getPageContent(tabId, includeMetadata = true) {
 		try {
-			await this.sendToBrowser("getPageContent", { tabId });
+			const params = {};
+			if (tabId !== undefined && tabId !== null) {
+				params.tabId = tabId;
+			}
+			const pageContent = await this.sendToBrowser("getPageContent", params);
 
-			const data = Array.from(this.browserData.values()).find(
-				(d) => !tabId || d.tabId == tabId,
-			);
-
-			if (!data?.pageContent) {
+			if (!pageContent) {
 				throw new Error("No page content available");
 			}
 
 			const result = {
-				url: data.pageContent.url,
-				title: data.pageContent.title,
-				text: data.pageContent.text,
-				html: includeMetadata ? data.pageContent.html : undefined,
-				metadata: includeMetadata ? data.pageContent.metadata : undefined,
+				url: pageContent.url,
+				title: pageContent.title,
+				text: pageContent.text,
+				html: includeMetadata ? pageContent.html : undefined,
+				metadata: includeMetadata ? pageContent.metadata : undefined,
 			};
 
 			return {
@@ -1023,13 +1175,13 @@ class BrowserMCPHttpServer {
 
 	async getDOMSnapshot(tabId, maxDepth = 10, includeStyles = false) {
 		try {
-			await this.sendToBrowser("getDOMSnapshot", { tabId });
+			const params = {};
+			if (tabId !== undefined && tabId !== null) {
+				params.tabId = tabId;
+			}
+			const domSnapshot = await this.sendToBrowser("getDOMSnapshot", params);
 
-			const data = Array.from(this.browserData.values()).find(
-				(d) => !tabId || d.tabId == tabId,
-			);
-
-			if (!data?.domSnapshot) {
+			if (!domSnapshot) {
 				throw new Error("No DOM snapshot available");
 			}
 
@@ -1037,7 +1189,7 @@ class BrowserMCPHttpServer {
 				content: [
 					{
 						type: "text",
-						text: JSON.stringify(data.domSnapshot, null, 2),
+						text: JSON.stringify(domSnapshot, null, 2),
 					},
 				],
 			};
@@ -1048,10 +1200,11 @@ class BrowserMCPHttpServer {
 
 	async executeJavaScript(tabId, code) {
 		try {
-			const result = await this.sendToBrowser("executeScript", {
-				tabId,
-				script: code,
-			});
+			const params = { script: code };
+			if (tabId !== undefined && tabId !== null) {
+				params.tabId = tabId;
+			}
+			const result = await this.sendToBrowser("executeScript", params);
 
 			return {
 				content: [
@@ -1068,17 +1221,17 @@ class BrowserMCPHttpServer {
 
 	async getConsoleMessages(tabId, types, limit = 100) {
 		try {
-			await this.sendToBrowser("getConsoleMessages", { tabId });
+			const params = {};
+			if (tabId !== undefined && tabId !== null) {
+				params.tabId = tabId;
+			}
+			const consoleLogs = await this.sendToBrowser("getConsoleMessages", params);
 
-			const data = Array.from(this.browserData.values()).find(
-				(d) => !tabId || d.tabId == tabId,
-			);
-
-			if (!data?.consoleLogs) {
+			if (!consoleLogs) {
 				throw new Error("No console messages available");
 			}
 
-			let messages = data.consoleLogs;
+			let messages = consoleLogs;
 
 			if (types && types.length > 0) {
 				messages = messages.filter((msg) => types.includes(msg.type));
@@ -1101,13 +1254,13 @@ class BrowserMCPHttpServer {
 
 	async getNetworkRequests(tabId, limit = 50) {
 		try {
-			await this.sendToBrowser("getNetworkData", { tabId });
+			const params = {};
+			if (tabId !== undefined && tabId !== null) {
+				params.tabId = tabId;
+			}
+			const networkData = await this.sendToBrowser("getNetworkData", params);
 
-			const data = Array.from(this.browserData.values()).find(
-				(d) => !tabId || d.tabId == tabId,
-			);
-
-			if (!data?.networkData) {
+			if (!networkData) {
 				throw new Error("No network data available");
 			}
 
@@ -1115,7 +1268,7 @@ class BrowserMCPHttpServer {
 				content: [
 					{
 						type: "text",
-						text: JSON.stringify(data.networkData, null, 2),
+						text: JSON.stringify(networkData, null, 2),
 					},
 				],
 			};
@@ -1126,13 +1279,13 @@ class BrowserMCPHttpServer {
 
 	async captureScreenshot(tabId, format = "png", quality = 90) {
 		try {
-			await this.sendToBrowser("captureScreenshot", { tabId, format, quality });
+			const params = { format, quality };
+			if (tabId !== undefined && tabId !== null) {
+				params.tabId = tabId;
+			}
+			const screenshot = await this.sendToBrowser("captureScreenshot", params);
 
-			const data = Array.from(this.browserData.values()).find(
-				(d) => !tabId || d.tabId == tabId,
-			);
-
-			if (!data?.screenshot) {
+			if (!screenshot) {
 				throw new Error("No screenshot available");
 			}
 
@@ -1140,7 +1293,7 @@ class BrowserMCPHttpServer {
 				content: [
 					{
 						type: "text",
-						text: `Screenshot captured in ${format} format. Data URL: ${data.screenshot.substring(0, 100)}...`,
+						text: `Screenshot captured in ${format} format. Data URL: ${screenshot.substring(0, 100)}...`,
 					},
 				],
 			};
@@ -1151,13 +1304,13 @@ class BrowserMCPHttpServer {
 
 	async getPerformanceMetrics(tabId) {
 		try {
-			await this.sendToBrowser("getPerformanceMetrics", { tabId });
+			const params = {};
+			if (tabId !== undefined && tabId !== null) {
+				params.tabId = tabId;
+			}
+			const performanceMetrics = await this.sendToBrowser("getPerformanceMetrics", params);
 
-			const data = Array.from(this.browserData.values()).find(
-				(d) => !tabId || d.tabId == tabId,
-			);
-
-			if (!data?.performanceMetrics) {
+			if (!performanceMetrics) {
 				throw new Error("No performance metrics available");
 			}
 
@@ -1165,7 +1318,7 @@ class BrowserMCPHttpServer {
 				content: [
 					{
 						type: "text",
-						text: JSON.stringify(data.performanceMetrics, null, 2),
+						text: JSON.stringify(performanceMetrics, null, 2),
 					},
 				],
 			};
@@ -1174,15 +1327,18 @@ class BrowserMCPHttpServer {
 		}
 	}
 
-	async getAccessibilityTree(tabId) {
+	async getAccessibilityTree(tabId, timeout) {
 		try {
-			await this.sendToBrowser("getAccessibilityTree", { tabId });
+			const params = {};
+			if (tabId !== undefined && tabId !== null) {
+				params.tabId = tabId;
+			}
+			if (timeout !== undefined && timeout !== null) {
+				params.timeout = timeout;
+			}
+			const accessibilityTree = await this.sendToBrowser("getAccessibilityTree", params);
 
-			const data = Array.from(this.browserData.values()).find(
-				(d) => !tabId || d.tabId == tabId,
-			);
-
-			if (!data?.accessibilityTree) {
+			if (!accessibilityTree) {
 				throw new Error("No accessibility tree available");
 			}
 
@@ -1190,7 +1346,7 @@ class BrowserMCPHttpServer {
 				content: [
 					{
 						type: "text",
-						text: JSON.stringify(data.accessibilityTree, null, 2),
+						text: JSON.stringify(accessibilityTree, null, 2),
 					},
 				],
 			};
@@ -1201,11 +1357,9 @@ class BrowserMCPHttpServer {
 
 	async getBrowserTabs() {
 		try {
-			await this.sendToBrowser("getAllTabs");
+			const tabs = await this.sendToBrowser("getAllTabs");
 
-			const data = Array.from(this.browserData.values())[0];
-
-			if (!data?.tabs) {
+			if (!tabs) {
 				throw new Error("No tab information available");
 			}
 
@@ -1213,7 +1367,7 @@ class BrowserMCPHttpServer {
 				content: [
 					{
 						type: "text",
-						text: JSON.stringify(data.tabs, null, 2),
+						text: JSON.stringify(tabs, null, 2),
 					},
 				],
 			};
@@ -1224,6 +1378,9 @@ class BrowserMCPHttpServer {
 
 	async attachDebugger(tabId) {
 		try {
+			if (tabId === undefined || tabId === null) {
+				throw new Error('tabId is required for debugger operations');
+			}
 			await this.sendToBrowser("attachDebugger", { tabId });
 
 			return {
@@ -1241,6 +1398,9 @@ class BrowserMCPHttpServer {
 
 	async detachDebugger(tabId) {
 		try {
+			if (tabId === undefined || tabId === null) {
+				throw new Error('tabId is required for debugger operations');
+			}
 			await this.sendToBrowser("detachDebugger", { tabId });
 
 			return {

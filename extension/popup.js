@@ -13,6 +13,9 @@ class PopupController {
   }
 
   initializeUI() {
+    // Set version display
+    this.setVersionDisplay();
+    
     // Button event listeners
     document.getElementById('connect-btn').addEventListener('click', () => {
       this.toggleConnection();
@@ -184,6 +187,13 @@ class PopupController {
   saveSettings() {
     const serverUrl = document.getElementById('server-url').value;
     chrome.storage.sync.set({ serverUrl });
+  }
+
+  setVersionDisplay() {
+    // Generate a timestamp-based version for easy visual tracking
+    const now = new Date();
+    const version = `v${now.getMonth() + 1}.${now.getDate()}.${now.getHours()}${now.getMinutes().toString().padStart(2, '0')}`;
+    document.getElementById('version').textContent = version;
   }
 
   showError(message) {

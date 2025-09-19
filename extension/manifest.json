@@ -12,7 +12,8 @@
     "webNavigation",
     "storage",
     "webRequest",
-    "contextMenus"
+    "contextMenus",
+    "windows"
   ],
   
   "host_permissions": [
