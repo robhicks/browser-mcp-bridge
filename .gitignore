@@ -129,3 +129,50 @@ extension/icons/*.ico
 # MCP server specific
 server/dist/
 server/build/
+
+# Rust server specific
+rust-server/target/
+rust-server/Cargo.lock
+rust-server/*.pdb
+rust-server/*.rlib
+rust-server/*.pdb
+rust-server/debug/
+rust-server/release/
+
+# Rust build artifacts
+*.exe
+*.pdb
+*.dll
+*.so
+*.dylib
+
+# Rust documentation
+rust-server/doc/
+
+# Rust testing
+rust-server/target/
+rust-server/.cargo/
+rust-server/*.orig
+
+# Rust-analyzer cache
+rust-server/.rust-analyzer/
+
+# Benchmark outputs
+rust-server/criterion/
+rust-server/benches/results/
+
+# Rust configuration
+rust-server/.rustfmt.toml
+rust-server/clippy.toml
+
+# Local configuration overrides
+rust-server/config.local.toml
+rust-server/.env.local
+rust-server/.env.production
+rust-server/.env.development
+
+# Runtime files
+rust-server/logs/
+rust-server/data/
+rust-server/cache/
+rust-server/*.pid

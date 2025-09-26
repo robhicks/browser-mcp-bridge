@@ -1,0 +1,30 @@
+# Browser MCP Rust Server Configuration
+
+[server]
+host = "127.0.0.1"
+port = 6009
+websocket_port = 6010
+worker_threads = 4        # Optional: specify number of worker threads
+max_connections = 1000
+request_timeout_secs = 30
+cors_origins = ["*"]
+
+[cache]
+max_size_mb = 512
+cleanup_interval_secs = 300     # 5 minutes
+data_ttl_secs = 3600            # 1 hour
+enable_persistent_cache = false
+
+[connections]
+websocket_timeout_secs = 300    # 5 minutes
+health_check_interval_secs = 30
+max_connections_per_tab = 10
+heartbeat_interval_secs = 30
+connection_retry_attempts = 3
+
+[monitoring]
+enable_metrics = true
+prometheus_port = 9090
+log_level = "info"
+enable_request_logging = true
+enable_performance_monitoring = true

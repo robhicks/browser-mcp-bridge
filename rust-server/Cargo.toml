@@ -1,0 +1,87 @@
+[package]
+name = "browser-mcp-rust-server"
+version = "1.0.0"
+edition = "2021"
+authors = ["Browser MCP Bridge"]
+description = "High-performance Rust MCP server for browser extension bridge"
+license = "MIT"
+
+[dependencies]
+# MCP SDK (official Rust implementation)
+rmcp = { version = "0.2", features = ["server", "transport-streamable-http-server", "transport-worker"] }
+
+# Async runtime and core utilities
+tokio = { version = "1.35", features = ["full"] }
+tokio-tungstenite = "0.21"
+tokio-util = { version = "0.7", features = ["codec"] }
+futures-util = "0.3"
+async-trait = "0.1"
+
+# HTTP server for WebSocket connections only (browser extensions)
+axum = { version = "0.7", features = ["ws"] }
+tower = { version = "0.4", features = ["timeout"] }
+tower-http = { version = "0.5", features = ["cors"] }
+
+# Serialization and JSON processing
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+simd-json = "0.13"  # High-performance JSON parsing
+
+# High-performance data structures
+dashmap = "5.5"      # Lock-free concurrent HashMap
+parking_lot = "0.12" # Fast mutex and RwLock
+arc-swap = "1.6"     # Atomic reference swapping
+compact_str = "0.7"  # Memory-efficient strings
+
+# Utilities
+uuid = { version = "1.8", features = ["v4", "serde"] }
+bytes = "1.5"        # Zero-copy byte buffers
+thiserror = "1.0"    # Error handling macros
+anyhow = "1.0"       # Error context
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1.10"
+base64 = "0.21"
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+metrics = "0.21"
+metrics-exporter-prometheus = "0.12"
+
+# Configuration
+config = "0.14"
+clap = { version = "4.4", features = ["derive"] }
+toml = "0.8"
+
+# HTTP client for health checks
+reqwest = { version = "0.11", features = ["json"] }
+
+# Collections
+indexmap = "2.0"
+
+# Development dependencies
+[dev-dependencies]
+tokio-test = "0.4"
+criterion = { version = "0.5", features = ["html_reports"] }
+tempfile = "3.8"
+tower-service = "0.3"
+axum-test = "14.0"
+
+# Performance optimization profile
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+opt-level = 3
+
+# Benchmark profile
+[profile.bench]
+debug = true
+
+[[bin]]
+name = "browser-mcp-rust-server"
+path = "src/main.rs"
+
+[[bench]]
+name = "server_benchmark"
+harness = false

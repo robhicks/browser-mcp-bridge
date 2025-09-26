@@ -75,9 +75,12 @@ class MCPBridge {
         this.lastPongReceived = Date.now();
         this.broadcastStatus();
         this.sendToMCP({
-          type: 'connection',
-          status: 'connected',
-          timestamp: Date.now()
+          type: 'notification',
+          event: {
+            type: 'connection_established',
+            status: 'connected',
+            timestamp: Date.now()
+          }
         });
       };
 
@@ -197,11 +200,14 @@ class MCPBridge {
     chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       if (request.type === 'content-data') {
         this.sendToMCP({
-          type: 'browser-data',
-          source: 'content-script',
-          tabId: sender.tab.id,
-          url: sender.tab.url,
-          data: request.data
+          type: 'notification',
+          event: {
+            type: 'browser_data',
+            source: 'content-script',
+            tabId: sender.tab.id,
+            url: sender.tab.url,
+            data: request.data
+          }
         });
       }
       return true;
@@ -276,11 +282,14 @@ class MCPBridge {
     // Listen for debugger events
     chrome.debugger.onEvent.addListener((source, method, params) => {
       this.sendToMCP({
-        type: 'debugger-event',
-        source,
-        method,
-        params,
-        timestamp: Date.now()
+        type: 'notification',
+        event: {
+          type: 'debugger_event',
+          source,
+          method,
+          params,
+          timestamp: Date.now()
+        }
       });
     });
 
@@ -977,9 +986,12 @@ class MCPBridge {
   handleDevToolsMessage(message, port) {
     // Forward DevTools messages to MCP server
     this.sendToMCP({
-      type: 'devtools-message',
-      tabId: message.tabId,
-      data: message.data
+      type: 'notification',
+      event: {
+        type: 'devtools_message',
+        tabId: message.tabId,
+        data: message.data
+      }
     });
   }
 
@@ -1024,8 +1036,8 @@ class MCPBridge {
     try {
       console.log('[HEALTH] Sending ping to test connection health');
       this.sendToMCP({
-        type: 'ping',
-        timestamp: now
+        type: 'heartbeat',
+        timestamp: new Date(now).toISOString()
       });
       
       // Set timeout to detect if pong doesn't come back
