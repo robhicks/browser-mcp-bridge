@@ -41,7 +41,56 @@ class BrowserMCPHttpServer {
 		this.httpServer = null;
 		this.port = 6009;
 
+		// Data size limits (in characters)
+		this.MAX_HTML_SIZE = 50000;  // 50KB of HTML
+		this.MAX_TEXT_SIZE = 30000;  // 30KB of text
+		this.MAX_DOM_NODES = 500;    // 500 DOM nodes
+		this.MAX_RESPONSE_SIZE = 100000; // 100KB total response
+
 		this.setupMCPHandlers();
+	}
+
+	// Utility: Truncate string with indicator
+	truncateString(str, maxLength, indicator = "\n... [TRUNCATED - original size: {{size}}]") {
+		if (!str || str.length <= maxLength) return str;
+		const truncated = str.substring(0, maxLength);
+		return truncated + indicator.replace("{{size}}", str.length.toString());
+	}
+
+	// Utility: Calculate approximate size of JSON data
+	getDataSize(data) {
+		return JSON.stringify(data).length;
+	}
+
+	// Utility: Truncate DOM tree to max nodes
+	truncateDOMTree(node, maxNodes, currentCount = { value: 0 }) {
+		if (!node || currentCount.value >= maxNodes) {
+			return { truncated: true, reason: "Max nodes reached" };
+		}
+
+		currentCount.value++;
+
+		const result = {
+			tag: node.tag,
+			attributes: node.attributes,
+			text: node.text ? this.truncateString(node.text, 500) : undefined
+		};
+
+		if (node.children && node.children.length > 0 && currentCount.value < maxNodes) {
+			result.children = [];
+			for (const child of node.children) {
+				if (currentCount.value >= maxNodes) {
+					result.children.push({
+						truncated: true,
+						remainingChildren: node.children.length - result.children.length
+					});
+					break;
+				}
+				result.children.push(this.truncateDOMTree(child, maxNodes, currentCount));
+			}
+		}
+
+		return result;
 	}
 
 	setupMCPHandlers() {
@@ -51,7 +100,7 @@ class BrowserMCPHttpServer {
 				tools: [
 					{
 						name: "get_page_content",
-						description: "Get the full content and metadata of a web page",
+						description: "Get the full content and metadata of a web page. Returns text content by default for optimal performance.",
 						inputSchema: {
 							type: "object",
 							properties: {
@@ -66,24 +115,41 @@ class BrowserMCPHttpServer {
 										"Include page metadata like title, meta tags, etc.",
 									default: true,
 								},
+								includeHtml: {
+									type: "boolean",
+									description:
+										"Include full HTML (may be large, truncated at 50KB). Default: false",
+									default: false,
+								},
+								maxTextLength: {
+									type: "number",
+									description:
+										"Maximum length of text content (default: 30000 chars)",
+									default: 30000,
+								},
 							},
 						},
 					},
 					{
 						name: "get_dom_snapshot",
-						description: "Get a structured snapshot of the DOM tree",
+						description: "Get a structured snapshot of the DOM tree. Automatically limits to 500 nodes for optimal performance.",
 						inputSchema: {
 							type: "object",
 							properties: {
 								tabId: { type: "number", description: "Browser tab ID" },
 								maxDepth: {
 									type: "number",
-									description: "Maximum DOM tree depth",
-									default: 10,
+									description: "Maximum DOM tree depth (default: 5 for performance)",
+									default: 5,
+								},
+								maxNodes: {
+									type: "number",
+									description: "Maximum number of DOM nodes to return (default: 500)",
+									default: 500,
 								},
 								includeStyles: {
 									type: "boolean",
-									description: "Include computed styles",
+									description: "Include computed styles (increases size significantly)",
 									default: false,
 								},
 							},
@@ -127,15 +193,25 @@ class BrowserMCPHttpServer {
 					},
 					{
 						name: "get_network_requests",
-						description: "Get network requests and responses from the browser",
+						description: "Get network requests and responses from the browser. Response bodies excluded by default for performance.",
 						inputSchema: {
 							type: "object",
 							properties: {
 								tabId: { type: "number", description: "Browser tab ID" },
 								limit: {
 									type: "number",
-									description: "Maximum number of requests",
+									description: "Maximum number of requests (default: 50)",
 									default: 50,
+								},
+								includeResponseBodies: {
+									type: "boolean",
+									description: "Include response bodies (may be very large). Default: false",
+									default: false,
+								},
+								includeRequestBodies: {
+									type: "boolean",
+									description: "Include request bodies (may be large). Default: false",
+									default: false,
 								},
 							},
 						},
@@ -276,34 +352,58 @@ class BrowserMCPHttpServer {
 
 				switch (resourceType) {
 					case "content":
+						let html = data.pageContent?.html || "";
+						const originalHtmlSize = html.length;
+						if (html.length > this.MAX_HTML_SIZE) {
+							html = this.truncateString(html, this.MAX_HTML_SIZE);
+						}
 						return {
 							contents: [
 								{
 									uri,
 									mimeType: "text/html",
-									text: data.pageContent?.html || "",
+									text: html,
 								},
 							],
 						};
 
 					case "dom":
+						let domData = data.domSnapshot;
+						if (domData && domData.root) {
+							const nodeCounter = { value: 0 };
+							domData = {
+								...domData,
+								root: this.truncateDOMTree(domData.root, this.MAX_DOM_NODES, nodeCounter),
+								truncated: nodeCounter.value >= this.MAX_DOM_NODES,
+								returnedNodeCount: nodeCounter.value,
+							};
+						}
 						return {
 							contents: [
 								{
 									uri,
 									mimeType: "application/json",
-									text: JSON.stringify(data.domSnapshot, null, 2),
+									text: JSON.stringify(domData, null, 2),
 								},
 							],
 						};
 
 					case "console":
+						let consoleLogs = data.consoleLogs || [];
+						// Limit to last 100 messages
+						if (consoleLogs.length > 100) {
+							consoleLogs = consoleLogs.slice(-100);
+						}
 						return {
 							contents: [
 								{
 									uri,
 									mimeType: "application/json",
-									text: JSON.stringify(data.consoleLogs, null, 2),
+									text: JSON.stringify({
+										messages: consoleLogs,
+										count: consoleLogs.length,
+										limited: (data.consoleLogs || []).length > 100,
+									}, null, 2),
 								},
 							],
 						};
@@ -320,13 +420,19 @@ class BrowserMCPHttpServer {
 
 			switch (name) {
 				case "get_page_content":
-					return await this.getPageContent(args?.tabId, args?.includeMetadata);
+					return await this.getPageContent(
+						args?.tabId,
+						args?.includeMetadata,
+						args?.includeHtml,
+						args?.maxTextLength
+					);
 
 				case "get_dom_snapshot":
 					return await this.getDOMSnapshot(
 						args?.tabId,
 						args?.maxDepth,
 						args?.includeStyles,
+						args?.maxNodes,
 					);
 
 				case "execute_javascript":
@@ -340,7 +446,12 @@ class BrowserMCPHttpServer {
 					);
 
 				case "get_network_requests":
-					return await this.getNetworkRequests(args?.tabId, args?.limit);
+					return await this.getNetworkRequests(
+						args?.tabId,
+						args?.limit,
+						args?.includeResponseBodies,
+						args?.includeRequestBodies
+					);
 
 				case "capture_screenshot":
 					return await this.captureScreenshot(
@@ -392,7 +503,7 @@ class BrowserMCPHttpServer {
 			tools: [
 				{
 					name: "get_page_content",
-					description: "Get the full content and metadata of a web page",
+					description: "Get the full content and metadata of a web page. Returns text content by default for optimal performance.",
 					inputSchema: {
 						type: "object",
 						properties: {
@@ -407,24 +518,41 @@ class BrowserMCPHttpServer {
 									"Include page metadata like title, meta tags, etc.",
 								default: true,
 							},
+							includeHtml: {
+								type: "boolean",
+								description:
+									"Include full HTML (may be large, truncated at 50KB). Default: false",
+								default: false,
+							},
+							maxTextLength: {
+								type: "number",
+								description:
+									"Maximum length of text content (default: 30000 chars)",
+								default: 30000,
+							},
 						},
 					},
 				},
 				{
 					name: "get_dom_snapshot",
-					description: "Get a structured snapshot of the DOM tree",
+					description: "Get a structured snapshot of the DOM tree. Automatically limits to 500 nodes for optimal performance.",
 					inputSchema: {
 						type: "object",
 						properties: {
 							tabId: { type: "number", description: "Browser tab ID" },
 							maxDepth: {
 								type: "number",
-								description: "Maximum DOM tree depth",
-								default: 10,
+								description: "Maximum DOM tree depth (default: 5 for performance)",
+								default: 5,
+							},
+							maxNodes: {
+								type: "number",
+								description: "Maximum number of DOM nodes to return (default: 500)",
+								default: 500,
 							},
 							includeStyles: {
 								type: "boolean",
-								description: "Include computed styles",
+								description: "Include computed styles (increases size significantly)",
 								default: false,
 							},
 						},
@@ -468,15 +596,25 @@ class BrowserMCPHttpServer {
 				},
 				{
 					name: "get_network_requests",
-					description: "Get network requests and responses from the browser",
+					description: "Get network requests and responses from the browser. Response bodies excluded by default for performance.",
 					inputSchema: {
 						type: "object",
 						properties: {
 							tabId: { type: "number", description: "Browser tab ID" },
 							limit: {
 								type: "number",
-								description: "Maximum number of requests",
+								description: "Maximum number of requests (default: 50)",
 								default: 50,
+							},
+							includeResponseBodies: {
+								type: "boolean",
+								description: "Include response bodies (may be very large). Default: false",
+								default: false,
+							},
+							includeRequestBodies: {
+								type: "boolean",
+								description: "Include request bodies (may be large). Default: false",
+								default: false,
 							},
 						},
 					},
@@ -620,34 +758,58 @@ class BrowserMCPHttpServer {
 
 		switch (resourceType) {
 			case "content":
+				let html = data.pageContent?.html || "";
+				const originalHtmlSize = html.length;
+				if (html.length > this.MAX_HTML_SIZE) {
+					html = this.truncateString(html, this.MAX_HTML_SIZE);
+				}
 				return {
 					contents: [
 						{
 							uri,
 							mimeType: "text/html",
-							text: data.pageContent?.html || "",
+							text: html,
 						},
 					],
 				};
 
 			case "dom":
+				let domData = data.domSnapshot;
+				if (domData && domData.root) {
+					const nodeCounter = { value: 0 };
+					domData = {
+						...domData,
+						root: this.truncateDOMTree(domData.root, this.MAX_DOM_NODES, nodeCounter),
+						truncated: nodeCounter.value >= this.MAX_DOM_NODES,
+						returnedNodeCount: nodeCounter.value,
+					};
+				}
 				return {
 					contents: [
 						{
 							uri,
 							mimeType: "application/json",
-							text: JSON.stringify(data.domSnapshot, null, 2),
+							text: JSON.stringify(domData, null, 2),
 						},
 					],
 				};
 
 			case "console":
+				let consoleLogs = data.consoleLogs || [];
+				// Limit to last 100 messages
+				if (consoleLogs.length > 100) {
+					consoleLogs = consoleLogs.slice(-100);
+				}
 				return {
 					contents: [
 						{
 							uri,
 							mimeType: "application/json",
-							text: JSON.stringify(data.consoleLogs, null, 2),
+							text: JSON.stringify({
+								messages: consoleLogs,
+								count: consoleLogs.length,
+								limited: (data.consoleLogs || []).length > 100,
+							}, null, 2),
 						},
 					],
 				};
@@ -662,13 +824,19 @@ class BrowserMCPHttpServer {
 
 		switch (name) {
 			case "get_page_content":
-				return await this.getPageContent(args?.tabId, args?.includeMetadata);
+				return await this.getPageContent(
+					args?.tabId,
+					args?.includeMetadata,
+					args?.includeHtml,
+					args?.maxTextLength
+				);
 
 			case "get_dom_snapshot":
 				return await this.getDOMSnapshot(
 					args?.tabId,
 					args?.maxDepth,
 					args?.includeStyles,
+					args?.maxNodes,
 				);
 
 			case "execute_javascript":
@@ -682,7 +850,12 @@ class BrowserMCPHttpServer {
 				);
 
 			case "get_network_requests":
-				return await this.getNetworkRequests(args?.tabId, args?.limit);
+				return await this.getNetworkRequests(
+					args?.tabId,
+					args?.limit,
+					args?.includeResponseBodies,
+					args?.includeRequestBodies
+				);
 
 			case "capture_screenshot":
 				return await this.captureScreenshot(
@@ -1140,7 +1313,7 @@ class BrowserMCPHttpServer {
 		});
 	}
 
-	async getPageContent(tabId, includeMetadata = true) {
+	async getPageContent(tabId, includeMetadata = true, includeHtml = false, maxTextLength = 30000) {
 		try {
 			const params = {};
 			if (tabId !== undefined && tabId !== null) {
@@ -1152,11 +1325,34 @@ class BrowserMCPHttpServer {
 				throw new Error("No page content available");
 			}
 
+			// Truncate text content
+			let text = pageContent.text || "";
+			const originalTextSize = text.length;
+			if (text.length > maxTextLength) {
+				text = this.truncateString(text, maxTextLength);
+			}
+
+			// Truncate HTML if included
+			let html = undefined;
+			let htmlTruncated = false;
+			if (includeHtml && pageContent.html) {
+				const originalHtmlSize = pageContent.html.length;
+				if (originalHtmlSize > this.MAX_HTML_SIZE) {
+					html = this.truncateString(pageContent.html, this.MAX_HTML_SIZE);
+					htmlTruncated = true;
+				} else {
+					html = pageContent.html;
+				}
+			}
+
 			const result = {
 				url: pageContent.url,
 				title: pageContent.title,
-				text: pageContent.text,
-				html: includeMetadata ? pageContent.html : undefined,
+				text: text,
+				textTruncated: originalTextSize > maxTextLength,
+				originalTextSize: originalTextSize,
+				html: html,
+				htmlTruncated: htmlTruncated,
 				metadata: includeMetadata ? pageContent.metadata : undefined,
 			};
 
@@ -1173,7 +1369,7 @@ class BrowserMCPHttpServer {
 		}
 	}
 
-	async getDOMSnapshot(tabId, maxDepth = 10, includeStyles = false) {
+	async getDOMSnapshot(tabId, maxDepth = 5, includeStyles = false, maxNodes = 500) {
 		try {
 			const params = {};
 			if (tabId !== undefined && tabId !== null) {
@@ -1185,16 +1381,56 @@ class BrowserMCPHttpServer {
 				throw new Error("No DOM snapshot available");
 			}
 
+			// Truncate DOM tree to maxNodes
+			const originalNodeCount = domSnapshot.nodeCount || 0;
+			let truncatedSnapshot = domSnapshot;
+			let wasTruncated = false;
+
+			if (domSnapshot.root && originalNodeCount > maxNodes) {
+				const nodeCounter = { value: 0 };
+				truncatedSnapshot = {
+					...domSnapshot,
+					root: this.truncateDOMTree(domSnapshot.root, maxNodes, nodeCounter),
+					truncated: true,
+					originalNodeCount: originalNodeCount,
+					returnedNodeCount: nodeCounter.value,
+				};
+				wasTruncated = true;
+			}
+
+			// Remove styles if not requested
+			if (!includeStyles && truncatedSnapshot.root) {
+				this.removeStylesFromDOMTree(truncatedSnapshot.root);
+			}
+
+			const result = {
+				...truncatedSnapshot,
+				truncated: wasTruncated,
+				message: wasTruncated
+					? `DOM tree truncated to ${maxNodes} nodes (original: ${originalNodeCount} nodes). Increase maxNodes parameter if you need more.`
+					: undefined
+			};
+
 			return {
 				content: [
 					{
 						type: "text",
-						text: JSON.stringify(domSnapshot, null, 2),
+						text: JSON.stringify(result, null, 2),
 					},
 				],
 			};
 		} catch (error) {
 			throw new Error(`Failed to get DOM snapshot: ${error.message}`);
+		}
+	}
+
+	// Helper to remove styles from DOM tree
+	removeStylesFromDOMTree(node) {
+		if (!node) return;
+		delete node.styles;
+		delete node.computedStyles;
+		if (node.children) {
+			node.children.forEach(child => this.removeStylesFromDOMTree(child));
 		}
 	}
 
@@ -1252,7 +1488,7 @@ class BrowserMCPHttpServer {
 		}
 	}
 
-	async getNetworkRequests(tabId, limit = 50) {
+	async getNetworkRequests(tabId, limit = 50, includeResponseBodies = false, includeRequestBodies = false) {
 		try {
 			const params = {};
 			if (tabId !== undefined && tabId !== null) {
@@ -1264,11 +1500,76 @@ class BrowserMCPHttpServer {
 				throw new Error("No network data available");
 			}
 
+			// Filter and limit requests
+			let requests = networkData.requests || networkData || [];
+
+			// Apply limit
+			if (requests.length > limit) {
+				requests = requests.slice(-limit); // Get most recent requests
+			}
+
+			// Filter out large bodies if not requested
+			const processedRequests = requests.map(request => {
+				const processed = { ...request };
+
+				if (!includeResponseBodies && processed.response) {
+					const originalSize = processed.response.body?.length || 0;
+					if (originalSize > 0) {
+						processed.response = {
+							...processed.response,
+							body: `[Response body excluded - ${originalSize} chars. Set includeResponseBodies:true to include]`,
+							bodySize: originalSize
+						};
+					}
+				} else if (includeResponseBodies && processed.response?.body) {
+					// Truncate very large response bodies
+					const maxBodySize = 10000;
+					if (processed.response.body.length > maxBodySize) {
+						processed.response.body = this.truncateString(
+							processed.response.body,
+							maxBodySize,
+							`\n... [Response body truncated from ${processed.response.body.length} chars]`
+						);
+					}
+				}
+
+				if (!includeRequestBodies && processed.request?.body) {
+					const originalSize = processed.request.body.length;
+					processed.request = {
+						...processed.request,
+						body: `[Request body excluded - ${originalSize} chars. Set includeRequestBodies:true to include]`,
+						bodySize: originalSize
+					};
+				} else if (includeRequestBodies && processed.request?.body) {
+					// Truncate very large request bodies
+					const maxBodySize = 10000;
+					if (processed.request.body.length > maxBodySize) {
+						processed.request.body = this.truncateString(
+							processed.request.body,
+							maxBodySize,
+							`\n... [Request body truncated from ${processed.request.body.length} chars]`
+						);
+					}
+				}
+
+				return processed;
+			});
+
+			const result = {
+				requests: processedRequests,
+				count: processedRequests.length,
+				total: (networkData.requests || networkData).length,
+				limited: (networkData.requests || networkData).length > limit,
+				message: (networkData.requests || networkData).length > limit
+					? `Showing ${limit} most recent requests out of ${(networkData.requests || networkData).length} total`
+					: undefined
+			};
+
 			return {
 				content: [
 					{
 						type: "text",
-						text: JSON.stringify(networkData, null, 2),
+						text: JSON.stringify(result, null, 2),
 					},
 				],
 			};

@@ -1,13 +1,25 @@
 {
   "name": "browser-mcp-bridge",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Browser extension and MCP server bridge for Claude Code integration",
   "main": "server/server.js",
+  "type": "module",
   "scripts": {
     "start": "cd server && npm start",
     "dev": "cd server && npm run dev",
+    "setup": "node browser-mcp-bridge.js",
+    "setup:dev": "node browser-mcp-bridge.js --dev",
     "install-server": "cd server && npm install",
     "install-all": "npm run install-server",
+    "pm2:start": "pm2 start ecosystem.config.cjs",
+    "pm2:start:dev": "pm2 start ecosystem.config.cjs --env development",
+    "pm2:stop": "pm2 stop browser-mcp-server",
+    "pm2:restart": "pm2 restart browser-mcp-server",
+    "pm2:delete": "pm2 delete browser-mcp-server",
+    "pm2:logs": "pm2 logs browser-mcp-server",
+    "pm2:status": "pm2 status",
+    "pm2:save": "pm2 save",
+    "pm2:startup": "pm2 startup",
     "test": "echo 'Tests not yet implemented'",
     "build": "echo 'Build process for extension packaging'",
     "clean": "rm -rf server/node_modules",
@@ -42,6 +54,6 @@
     "docs": "./docs"
   },
   "dependencies": {
-    "sharp": "^0.34.3"
+    "sharp": "^0.34.4"
   }
 }
