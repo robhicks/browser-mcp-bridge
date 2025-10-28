@@ -1,6 +1,6 @@
 {
   "name": "browser-mcp-bridge",
-  "version": "1.1.0",
+  "version": "2.0.0",
   "description": "Browser extension and MCP server bridge for Claude Code integration",
   "main": "server/server.js",
   "type": "module",

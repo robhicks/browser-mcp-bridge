@@ -46,6 +46,13 @@ class BrowserMCPHttpServer {
 		this.MAX_TEXT_SIZE = 30000;  // 30KB of text
 		this.MAX_DOM_NODES = 500;    // 500 DOM nodes
 		this.MAX_RESPONSE_SIZE = 100000; // 100KB total response
+		this.MAX_CONSOLE_MESSAGES = 50; // Default console message limit
+		this.MAX_NETWORK_REQUESTS = 50; // Default network request limit
+		this.MAX_REQUEST_BODY_SIZE = 10000; // 10KB max body size
+		this.MAX_RESPONSE_BODY_SIZE = 10000; // 10KB max body size
+
+		// Pagination cursors storage
+		this.paginationCursors = new Map();
 
 		this.setupMCPHandlers();
 	}
@@ -91,6 +98,179 @@ class BrowserMCPHttpServer {
 		}
 
 		return result;
+	}
+
+	// Utility: Filter console messages by type and search term
+	filterConsoleMessages(messages, options = {}) {
+		const { logLevels, searchTerm, since } = options;
+		let filtered = messages;
+
+		// Filter by log levels
+		if (logLevels && logLevels.length > 0) {
+			filtered = filtered.filter(msg => logLevels.includes(msg.level || msg.type));
+		}
+
+		// Filter by search term
+		if (searchTerm) {
+			const searchLower = searchTerm.toLowerCase();
+			filtered = filtered.filter(msg => {
+				const text = (msg.message || msg.text || '').toLowerCase();
+				return text.includes(searchLower);
+			});
+		}
+
+		// Filter by timestamp
+		if (since) {
+			filtered = filtered.filter(msg => {
+				const msgTime = msg.timestamp || msg.time || 0;
+				return msgTime >= since;
+			});
+		}
+
+		return filtered;
+	}
+
+	// Utility: Filter network requests
+	filterNetworkRequests(requests, options = {}) {
+		const { method, status, resourceType, domain, failedOnly } = options;
+		let filtered = requests;
+
+		// Filter by HTTP method
+		if (method) {
+			filtered = filtered.filter(req =>
+				(req.method || req.request?.method || '').toUpperCase() === method.toUpperCase()
+			);
+		}
+
+		// Filter by status code
+		if (status) {
+			filtered = filtered.filter(req => {
+				const reqStatus = req.status || req.response?.status;
+				if (Array.isArray(status)) {
+					return status.includes(reqStatus);
+				}
+				return reqStatus === status;
+			});
+		}
+
+		// Filter by resource type
+		if (resourceType) {
+			const types = Array.isArray(resourceType) ? resourceType : [resourceType];
+			filtered = filtered.filter(req =>
+				types.includes(req.type || req.resourceType)
+			);
+		}
+
+		// Filter by domain
+		if (domain) {
+			filtered = filtered.filter(req => {
+				const url = req.url || req.request?.url || '';
+				try {
+					const reqDomain = new URL(url).hostname;
+					return reqDomain.includes(domain);
+				} catch (e) {
+					return false;
+				}
+			});
+		}
+
+		// Filter failed requests only
+		if (failedOnly) {
+			filtered = filtered.filter(req => {
+				const status = req.status || req.response?.status || 0;
+				return status >= 400 || status === 0;
+			});
+		}
+
+		return filtered;
+	}
+
+	// Utility: Filter DOM tree by selector
+	filterDOMBySelector(node, selector) {
+		if (!node || !selector) return node;
+
+		// Simple implementation - in a real scenario, you'd want more sophisticated matching
+		const matches = (node) => {
+			if (!node.attributes) return false;
+
+			// Check class selector
+			if (selector.startsWith('.')) {
+				const className = selector.substring(1);
+				const nodeClasses = node.attributes.class || '';
+				return nodeClasses.split(' ').includes(className);
+			}
+
+			// Check id selector
+			if (selector.startsWith('#')) {
+				const id = selector.substring(1);
+				return node.attributes.id === id;
+			}
+
+			// Check tag selector
+			return node.tag?.toLowerCase() === selector.toLowerCase();
+		};
+
+		if (matches(node)) {
+			return node;
+		}
+
+		// Search children
+		if (node.children) {
+			for (const child of node.children) {
+				const found = this.filterDOMBySelector(child, selector);
+				if (found) return found;
+			}
+		}
+
+		return null;
+	}
+
+	// Utility: Generate pagination cursor
+	generateCursor(data, offset, limit) {
+		const cursorId = uuidv4();
+		this.paginationCursors.set(cursorId, {
+			data,
+			offset: offset + limit,
+			timestamp: Date.now()
+		});
+
+		// Clean up old cursors (older than 5 minutes)
+		const fiveMinutesAgo = Date.now() - 5 * 60 * 1000;
+		for (const [id, cursor] of this.paginationCursors.entries()) {
+			if (cursor.timestamp < fiveMinutesAgo) {
+				this.paginationCursors.delete(id);
+			}
+		}
+
+		return cursorId;
+	}
+
+	// Utility: Paginate array data
+	paginateData(data, cursor, pageSize) {
+		let offset = 0;
+		let dataSource = data;
+
+		// If cursor exists, use stored pagination state
+		if (cursor) {
+			const paginationState = this.paginationCursors.get(cursor);
+			if (paginationState) {
+				offset = paginationState.offset;
+				dataSource = paginationState.data;
+			}
+		}
+
+		const paginatedData = dataSource.slice(offset, offset + pageSize);
+		const hasMore = offset + pageSize < dataSource.length;
+		const nextCursor = hasMore ? this.generateCursor(dataSource, offset, pageSize) : null;
+
+		return {
+			data: paginatedData,
+			hasMore,
+			nextCursor,
+			total: dataSource.length,
+			offset,
+			pageSize
+		};
 	}
 
 	setupMCPHandlers() {
@@ -535,25 +715,43 @@ class BrowserMCPHttpServer {
 				},
 				{
 					name: "get_dom_snapshot",
-					description: "Get a structured snapshot of the DOM tree. Automatically limits to 500 nodes for optimal performance.",
+					description: "Get a structured DOM snapshot with filtering. Limits to 500 nodes by default. Use selector to target specific elements for detailed inspection.",
 					inputSchema: {
 						type: "object",
 						properties: {
 							tabId: { type: "number", description: "Browser tab ID" },
+							selector: {
+								type: "string",
+								description: "CSS selector to target specific elements (e.g., '.main-content', '#app', 'article'). Returns subtree starting from first match."
+							},
 							maxDepth: {
 								type: "number",
-								description: "Maximum DOM tree depth (default: 5 for performance)",
+								description: "Maximum DOM tree depth (default: 5 for performance, max: 15)",
 								default: 5,
+								minimum: 1,
+								maximum: 15
 							},
 							maxNodes: {
 								type: "number",
-								description: "Maximum number of DOM nodes to return (default: 500)",
+								description: "Maximum number of DOM nodes to return (default: 500, max: 2000)",
 								default: 500,
+								minimum: 10,
+								maximum: 2000
 							},
 							includeStyles: {
 								type: "boolean",
-								description: "Include computed styles (increases size significantly)",
+								description: "Include computed styles (increases size significantly). Default: false",
 								default: false,
+							},
+							excludeScripts: {
+								type: "boolean",
+								description: "Exclude <script> tags from snapshot. Default: true",
+								default: true
+							},
+							excludeStyles: {
+								type: "boolean",
+								description: "Exclude <style> tags from snapshot. Default: true",
+								default: true
 							},
 						},
 					},
@@ -575,45 +773,93 @@ class BrowserMCPHttpServer {
 				},
 				{
 					name: "get_console_messages",
-					description: "Get console messages from the browser",
+					description: "Get console messages from the browser with filtering and pagination. Returns errors/warnings by default for optimal relevance.",
 					inputSchema: {
 						type: "object",
 						properties: {
 							tabId: { type: "number", description: "Browser tab ID" },
-							types: {
+							logLevels: {
 								type: "array",
-								items: { type: "string" },
-								description:
-									"Message types to include (log, error, warn, info, debug)",
+								items: { type: "string", enum: ["error", "warn", "info", "log", "debug"] },
+								description: "Filter by log levels (default: ['error', 'warn'] for most relevant messages)",
+								default: ["error", "warn"],
 							},
-							limit: {
+							searchTerm: {
+								type: "string",
+								description: "Filter messages containing this search term (case-insensitive)"
+							},
+							since: {
 								type: "number",
-								description: "Maximum number of messages",
-								default: 100,
+								description: "Only return messages after this timestamp (milliseconds)"
+							},
+							pageSize: {
+								type: "number",
+								description: "Number of messages per page (default: 50, max: 200)",
+								default: 50,
+								minimum: 1,
+								maximum: 200
+							},
+							cursor: {
+								type: "string",
+								description: "Pagination cursor from previous response (for getting next page)"
 							},
 						},
 					},
 				},
 				{
 					name: "get_network_requests",
-					description: "Get network requests and responses from the browser. Response bodies excluded by default for performance.",
+					description: "Get network requests with filtering and pagination. Response/request bodies excluded by default. Returns failed requests first for relevance.",
 					inputSchema: {
 						type: "object",
 						properties: {
 							tabId: { type: "number", description: "Browser tab ID" },
-							limit: {
+							method: {
+								type: "string",
+								description: "Filter by HTTP method (GET, POST, PUT, DELETE, etc.)",
+								enum: ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]
+							},
+							status: {
+								oneOf: [
+									{ type: "number", description: "Filter by specific status code" },
+									{ type: "array", items: { type: "number" }, description: "Filter by multiple status codes" }
+								],
+								description: "Filter by HTTP status code(s)"
+							},
+							resourceType: {
+								oneOf: [
+									{ type: "string" },
+									{ type: "array", items: { type: "string" } }
+								],
+								description: "Filter by resource type (script, stylesheet, image, xhr, fetch, etc.)"
+							},
+							domain: {
+								type: "string",
+								description: "Filter by domain (matches if request URL contains this string)"
+							},
+							failedOnly: {
+								type: "boolean",
+								description: "Only return failed requests (4xx, 5xx status codes). Default: false",
+								default: false
+							},
+							pageSize: {
 								type: "number",
-								description: "Maximum number of requests (default: 50)",
+								description: "Number of requests per page (default: 50, max: 200)",
 								default: 50,
+								minimum: 1,
+								maximum: 200
+							},
+							cursor: {
+								type: "string",
+								description: "Pagination cursor from previous response"
 							},
 							includeResponseBodies: {
 								type: "boolean",
-								description: "Include response bodies (may be very large). Default: false",
+								description: "Include response bodies (truncated at 10KB). Default: false",
 								default: false,
 							},
 							includeRequestBodies: {
 								type: "boolean",
-								description: "Include request bodies (may be large). Default: false",
+								description: "Include request bodies (truncated at 10KB). Default: false",
 								default: false,
 							},
 						},
@@ -832,30 +1078,39 @@ class BrowserMCPHttpServer {
 				);
 
 			case "get_dom_snapshot":
-				return await this.getDOMSnapshot(
-					args?.tabId,
-					args?.maxDepth,
-					args?.includeStyles,
-					args?.maxNodes,
-				);
+				return await this.getDOMSnapshot(args?.tabId, {
+					selector: args?.selector,
+					maxDepth: args?.maxDepth,
+					maxNodes: args?.maxNodes,
+					includeStyles: args?.includeStyles,
+					excludeScripts: args?.excludeScripts,
+					excludeStyles: args?.excludeStyles
+				});
 
 			case "execute_javascript":
 				return await this.executeJavaScript(args?.tabId, args.code);
 
 			case "get_console_messages":
-				return await this.getConsoleMessages(
-					args?.tabId,
-					args?.types,
-					args?.limit,
-				);
+				return await this.getConsoleMessages(args?.tabId, {
+					logLevels: args?.logLevels,
+					searchTerm: args?.searchTerm,
+					since: args?.since,
+					pageSize: args?.pageSize,
+					cursor: args?.cursor
+				});
 
 			case "get_network_requests":
-				return await this.getNetworkRequests(
-					args?.tabId,
-					args?.limit,
-					args?.includeResponseBodies,
-					args?.includeRequestBodies
-				);
+				return await this.getNetworkRequests(args?.tabId, {
+					method: args?.method,
+					status: args?.status,
+					resourceType: args?.resourceType,
+					domain: args?.domain,
+					failedOnly: args?.failedOnly,
+					pageSize: args?.pageSize,
+					cursor: args?.cursor,
+					includeResponseBodies: args?.includeResponseBodies,
+					includeRequestBodies: args?.includeRequestBodies
+				});
 
 			case "capture_screenshot":
 				return await this.captureScreenshot(
@@ -1369,8 +1624,17 @@ class BrowserMCPHttpServer {
 		}
 	}
 
-	async getDOMSnapshot(tabId, maxDepth = 5, includeStyles = false, maxNodes = 500) {
+	async getDOMSnapshot(tabId, options = {}) {
 		try {
+			const {
+				selector,
+				maxDepth = 5,
+				maxNodes = 500,
+				includeStyles = false,
+				excludeScripts = true,
+				excludeStyles = true
+			} = options;
+
 			const params = {};
 			if (tabId !== undefined && tabId !== null) {
 				params.tabId = tabId;
@@ -1381,34 +1645,67 @@ class BrowserMCPHttpServer {
 				throw new Error("No DOM snapshot available");
 			}
 
+			let processedRoot = domSnapshot.root;
+
+			// Apply selector filter if specified
+			if (selector && processedRoot) {
+				processedRoot = this.filterDOMBySelector(processedRoot, selector);
+				if (!processedRoot) {
+					return {
+						content: [{
+							type: "text",
+							text: JSON.stringify({
+								error: `No element found matching selector: ${selector}`,
+								selector,
+								message: "Try a different selector or omit to get full DOM"
+							}, null, 2)
+						}]
+					};
+				}
+			}
+
+			// Filter out scripts and styles if requested
+			if (excludeScripts || excludeStyles) {
+				processedRoot = this.filterDOMTree(processedRoot, {
+					excludeScripts,
+					excludeStyles
+				});
+			}
+
 			// Truncate DOM tree to maxNodes
 			const originalNodeCount = domSnapshot.nodeCount || 0;
-			let truncatedSnapshot = domSnapshot;
 			let wasTruncated = false;
+			let returnedNodeCount = 0;
 
-			if (domSnapshot.root && originalNodeCount > maxNodes) {
+			if (processedRoot) {
 				const nodeCounter = { value: 0 };
-				truncatedSnapshot = {
-					...domSnapshot,
-					root: this.truncateDOMTree(domSnapshot.root, maxNodes, nodeCounter),
-					truncated: true,
-					originalNodeCount: originalNodeCount,
-					returnedNodeCount: nodeCounter.value,
-				};
-				wasTruncated = true;
+				processedRoot = this.truncateDOMTree(processedRoot, Math.min(maxNodes, 2000), nodeCounter);
+				returnedNodeCount = nodeCounter.value;
+				wasTruncated = returnedNodeCount >= maxNodes;
 			}
 
 			// Remove styles if not requested
-			if (!includeStyles && truncatedSnapshot.root) {
-				this.removeStylesFromDOMTree(truncatedSnapshot.root);
+			if (!includeStyles && processedRoot) {
+				this.removeStylesFromDOMTree(processedRoot);
 			}
 
 			const result = {
-				...truncatedSnapshot,
+				root: processedRoot,
+				nodeCount: returnedNodeCount,
+				originalNodeCount: originalNodeCount,
 				truncated: wasTruncated,
+				filters: {
+					selector: selector || null,
+					maxDepth,
+					maxNodes,
+					excludeScripts,
+					excludeStyles
+				},
 				message: wasTruncated
-					? `DOM tree truncated to ${maxNodes} nodes (original: ${originalNodeCount} nodes). Increase maxNodes parameter if you need more.`
-					: undefined
+					? `DOM tree truncated to ${maxNodes} nodes (original: ${originalNodeCount} nodes). Use selector to target specific elements or increase maxNodes.`
+					: selector
+						? `Showing subtree for selector '${selector}' (${returnedNodeCount} nodes)`
+						: `Showing complete DOM tree (${returnedNodeCount} nodes)`
 			};
 
 			return {
@@ -1422,6 +1719,34 @@ class BrowserMCPHttpServer {
 		} catch (error) {
 			throw new Error(`Failed to get DOM snapshot: ${error.message}`);
 		}
+	}
+
+	// Helper to filter DOM tree (exclude scripts/styles)
+	filterDOMTree(node, options = {}) {
+		if (!node) return null;
+
+		const { excludeScripts, excludeStyles } = options;
+		const tagLower = (node.tag || node.tagName || '').toLowerCase();
+
+		// Exclude script tags
+		if (excludeScripts && tagLower === 'script') {
+			return null;
+		}
+
+		// Exclude style tags
+		if (excludeStyles && tagLower === 'style') {
+			return null;
+		}
+
+		const filtered = { ...node };
+
+		if (node.children && node.children.length > 0) {
+			filtered.children = node.children
+				.map(child => this.filterDOMTree(child, options))
+				.filter(child => child !== null);
+		}
+
+		return filtered;
 	}
 
 	// Helper to remove styles from DOM tree
@@ -1455,8 +1780,16 @@ class BrowserMCPHttpServer {
 		}
 	}
 
-	async getConsoleMessages(tabId, types, limit = 100) {
+	async getConsoleMessages(tabId, options = {}) {
 		try {
+			const {
+				logLevels = ['error', 'warn'], // Default to errors and warnings for relevance
+				searchTerm,
+				since,
+				pageSize = 50,
+				cursor
+			} = options;
+
 			const params = {};
 			if (tabId !== undefined && tabId !== null) {
 				params.tabId = tabId;
@@ -1467,19 +1800,39 @@ class BrowserMCPHttpServer {
 				throw new Error("No console messages available");
 			}
 
-			let messages = consoleLogs;
+			// Apply filters
+			let filtered = this.filterConsoleMessages(consoleLogs, {
+				logLevels,
+				searchTerm,
+				since
+			});
 
-			if (types && types.length > 0) {
-				messages = messages.filter((msg) => types.includes(msg.type));
-			}
+			// Apply pagination
+			const paginated = this.paginateData(filtered, cursor, Math.min(pageSize, 200));
 
-			messages = messages.slice(-limit);
+			const result = {
+				messages: paginated.data,
+				count: paginated.data.length,
+				total: paginated.total,
+				hasMore: paginated.hasMore,
+				nextCursor: paginated.nextCursor,
+				filters: {
+					logLevels,
+					searchTerm: searchTerm || null,
+					since: since || null
+				},
+				message: paginated.total === 0
+					? "No messages match the specified filters"
+					: paginated.hasMore
+						? `Showing ${paginated.data.length} of ${paginated.total} messages. Use nextCursor to get more.`
+						: `Showing all ${paginated.total} matching messages`
+			};
 
 			return {
 				content: [
 					{
 						type: "text",
-						text: JSON.stringify({ messages, count: messages.length }, null, 2),
+						text: JSON.stringify(result, null, 2),
 					},
 				],
 			};
@@ -1488,8 +1841,20 @@ class BrowserMCPHttpServer {
 		}
 	}
 
-	async getNetworkRequests(tabId, limit = 50, includeResponseBodies = false, includeRequestBodies = false) {
+	async getNetworkRequests(tabId, options = {}) {
 		try {
+			const {
+				method,
+				status,
+				resourceType,
+				domain,
+				failedOnly = false,
+				pageSize = 50,
+				cursor,
+				includeResponseBodies = false,
+				includeRequestBodies = false
+			} = options;
+
 			const params = {};
 			if (tabId !== undefined && tabId !== null) {
 				params.tabId = tabId;
@@ -1500,16 +1865,35 @@ class BrowserMCPHttpServer {
 				throw new Error("No network data available");
 			}
 
-			// Filter and limit requests
 			let requests = networkData.requests || networkData || [];
 
-			// Apply limit
-			if (requests.length > limit) {
-				requests = requests.slice(-limit); // Get most recent requests
+			// Apply filters
+			requests = this.filterNetworkRequests(requests, {
+				method,
+				status,
+				resourceType,
+				domain,
+				failedOnly
+			});
+
+			// Sort: failed requests first for relevance
+			if (failedOnly || !method && !status && !resourceType && !domain) {
+				requests.sort((a, b) => {
+					const statusA = a.status || a.response?.status || 0;
+					const statusB = b.status || b.response?.status || 0;
+					const failedA = statusA >= 400 || statusA === 0;
+					const failedB = statusB >= 400 || statusB === 0;
+					if (failedA && !failedB) return -1;
+					if (!failedA && failedB) return 1;
+					return 0;
+				});
 			}
 
-			// Filter out large bodies if not requested
-			const processedRequests = requests.map(request => {
+			// Apply pagination
+			const paginated = this.paginateData(requests, cursor, Math.min(pageSize, 200));
+
+			// Process bodies
+			const processedRequests = paginated.data.map(request => {
 				const processed = { ...request };
 
 				if (!includeResponseBodies && processed.response) {
@@ -1522,8 +1906,7 @@ class BrowserMCPHttpServer {
 						};
 					}
 				} else if (includeResponseBodies && processed.response?.body) {
-					// Truncate very large response bodies
-					const maxBodySize = 10000;
+					const maxBodySize = this.MAX_RESPONSE_BODY_SIZE;
 					if (processed.response.body.length > maxBodySize) {
 						processed.response.body = this.truncateString(
 							processed.response.body,
@@ -1541,8 +1924,7 @@ class BrowserMCPHttpServer {
 						bodySize: originalSize
 					};
 				} else if (includeRequestBodies && processed.request?.body) {
-					// Truncate very large request bodies
-					const maxBodySize = 10000;
+					const maxBodySize = this.MAX_REQUEST_BODY_SIZE;
 					if (processed.request.body.length > maxBodySize) {
 						processed.request.body = this.truncateString(
 							processed.request.body,
@@ -1558,11 +1940,21 @@ class BrowserMCPHttpServer {
 			const result = {
 				requests: processedRequests,
 				count: processedRequests.length,
-				total: (networkData.requests || networkData).length,
-				limited: (networkData.requests || networkData).length > limit,
-				message: (networkData.requests || networkData).length > limit
-					? `Showing ${limit} most recent requests out of ${(networkData.requests || networkData).length} total`
-					: undefined
+				total: paginated.total,
+				hasMore: paginated.hasMore,
+				nextCursor: paginated.nextCursor,
+				filters: {
+					method: method || null,
+					status: status || null,
+					resourceType: resourceType || null,
+					domain: domain || null,
+					failedOnly
+				},
+				message: paginated.total === 0
+					? "No requests match the specified filters"
+					: paginated.hasMore
+						? `Showing ${processedRequests.length} of ${paginated.total} requests. Use nextCursor to get more.`
+						: `Showing all ${paginated.total} matching requests`
 			};
 
 			return {
