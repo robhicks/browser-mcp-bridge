@@ -1,445 +1,280 @@
 # Browser MCP Bridge
 
-A comprehensive browser extension and MCP server solution that bridges browser content, developer tools data, and web page interactions with Claude Code through the Model Context Protocol (MCP).
+Give Claude Code direct access to your browser. Inspect pages, read console errors, monitor network requests, capture screenshots, and execute JavaScript — all through natural language.
 
-## Overview
+## What This Does
 
-This project consists of two main components:
+Browser MCP Bridge connects your Chrome browser to Claude Code through the [Model Context Protocol (MCP)](https://modelcontextprotocol.io). It consists of two parts:
 
-1. **Browser Extension** - Captures browser content, DOM data, console messages, network activity, and developer tools information
-2. **MCP Server** - Exposes browser data to Claude Code through standardized MCP tools and resources
+1. **A Chrome extension** that captures browser data (page content, DOM, console, network, performance, accessibility)
+2. **An MCP server** that exposes that data to Claude Code through 11 specialized tools
 
-## Features
+Once connected, you can ask Claude Code things like:
+- "Check this page for accessibility issues"
+- "What console errors are on this page?"
+- "Show me the failed API requests"
+- "Analyze the performance of this page"
+- "Execute `document.querySelectorAll('a')` on the current page"
 
-### Browser Extension
-- **Page Content Extraction** - Full HTML, text content, metadata, and page structure
-- **DOM Inspection** - Complete DOM tree snapshots with computed styles
-- **Console Monitoring** - Real-time console logs, errors, and warnings
-- **Network Activity** - HTTP requests, responses, and performance metrics
-- **Developer Tools Integration** - Custom DevTools panel for advanced inspection
-- **JavaScript Execution** - Execute arbitrary JavaScript in page context
-- **Screenshot Capture** - Visual snapshots of browser tabs
-- **Accessibility Data** - Accessibility tree and ARIA attributes
-- **Performance Metrics** - Load times, resource usage, and Core Web Vitals
+## Quick Start
 
-### MCP Server
-- **11 Specialized Tools** - Comprehensive browser automation and inspection tools
-- **Dynamic Resources** - Real-time access to page content, DOM, and console data
-- **WebSocket Communication** - Real-time bidirectional communication with browser
-- **Multi-tab Support** - Manage and inspect multiple browser tabs simultaneously
+Get running in under 5 minutes:
 
-## Installation
-
-### Prerequisites
-
-- Node.js 18.0.0 or higher
-- Chrome, Edge, or Chromium-based browser
-- Claude Code CLI
-
-### 1. Install the MCP Server
+### 1. Install the Server
 
 ```bash
-# Clone or navigate to the project directory
-cd /path/to/browser-mcp
-
-# Install server dependencies
-cd server
-npm install
-
-# Make the server executable
-chmod +x index.js
+git clone https://github.com/anthropics/browser-mcp-bridge.git
+cd browser-mcp-bridge
+npm run install-server
 ```
 
 ### 2. Install the Browser Extension
 
-#### Chrome/Chromium/Edge Installation
+1. Open `chrome://extensions/` (or `edge://extensions/`)
+2. Enable **Developer mode** (top-right toggle)
+3. Click **Load unpacked**
+4. Select the `extension/` directory from this repo
 
-1. **Open Extension Management**
-   - Navigate to `chrome://extensions/` (Chrome)
-   - Or `edge://extensions/` (Edge)
-
-2. **Enable Developer Mode**
-   - Toggle "Developer mode" in the top-right corner
-
-3. **Load the Extension**
-   - Click "Load unpacked"
-   - Select the `/path/to/browser-mcp/extension` directory
-   - The extension should appear in your extensions list
-
-4. **Verify Installation**
-   - Look for the "Browser MCP Bridge" extension icon in your toolbar
-   - The extension should show as "Enabled"
-
-#### Alternative: Create Extension Package
-
-```bash
-# Navigate to extension directory
-cd extension
-
-# Create a zip package for distribution
-zip -r browser-mcp-extension.zip . -x "*.DS_Store" "node_modules/*"
-```
+You should see the "Browser MCP Bridge" icon in your toolbar.
 
 ### 3. Configure Claude Code
 
-Add the MCP server to your Claude Code configuration:
+```bash
+claude mcp add --scope user --transport http browser-mcp http://127.0.0.1:6009/mcp
+```
+
+### 4. Start the Server and Connect
+
+```bash
+npm start
+```
+
+Then click the Browser MCP Bridge extension icon and click **Connect**. The status indicator should turn green.
+
+That's it — Claude Code now has access to your browser.
+
+## Project Structure
+
+```
+browser-mcp-bridge/
+├── extension/                 # Chrome extension
+│   ├── manifest.json          # Manifest V3 configuration
+│   ├── background.js          # Service worker (WebSocket, tab management)
+│   ├── content.js             # Content script (page data extraction)
+│   ├── inject.js              # Injected script (console/network interception)
+│   ├── popup.html/js          # Extension popup (connection management)
+│   ├── devtools.html/js       # DevTools integration entry point
+│   ├── panel.html/js          # Custom DevTools panel UI
+│   └── icons/                 # Extension icons
+├── server/                    # Node.js MCP server
+│   ├── server.js              # HTTP MCP server + WebSocket server
+│   └── package.json           # Server dependencies
+├── rust-server/               # Rust MCP server (experimental)
+│   ├── src/                   # Rust source code
+│   ├── Cargo.toml             # Rust dependencies
+│   └── config.toml            # Server configuration
+├── ecosystem.config.cjs       # PM2 process manager config
+├── ARCHITECTURE.md            # System architecture documentation
+├── API_REFERENCE.md           # Complete MCP tools reference
+├── DATA_OPTIMIZATION.md       # Data filtering and pagination guide
+└── package.json               # Root scripts and orchestration
+```
+
+## How It Works
+
+```
+┌─────────────────┐     WebSocket      ┌──────────────────┐      HTTP/MCP      ┌─────────────────┐
+│ Chrome Extension │ ◄──────────────── │  MCP Server      │ ◄──────────────── │  Claude Code     │
+│                  │   ws://localhost   │  (port 6009)     │   http://localhost │  (one or more    │
+│  • content.js    │      :6009/ws     │                  │      :6009/mcp    │   instances)     │
+│  • background.js │ ─────────────────►│  • 11 MCP tools  │ ─────────────────►│                  │
+│  • inject.js     │                   │  • Resources     │                   │                  │
+│  • DevTools      │                   │  • Data filtering│                   │                  │
+└─────────────────┘                    └──────────────────┘                    └─────────────────┘
+```
+
+1. The **extension** captures browser data via content scripts and Chrome APIs
+2. A **WebSocket** connection sends data to the MCP server on port 6009
+3. **Claude Code** connects to the server via HTTP transport at `/mcp`
+4. Multiple Claude Code instances can share the same server
+
+## Available Tools
+
+| Tool | Description |
+|------|-------------|
+| `get_page_content` | Extract page text, HTML, and metadata |
+| `get_dom_snapshot` | Get structured DOM tree (filterable by CSS selector) |
+| `execute_javascript` | Run JavaScript in the page context |
+| `get_console_messages` | Read console logs, errors, and warnings |
+| `get_network_requests` | Inspect HTTP requests and responses |
+| `capture_screenshot` | Take a visual snapshot of the tab |
+| `get_performance_metrics` | Get load times and Core Web Vitals |
+| `get_accessibility_tree` | Get the accessibility tree |
+| `get_browser_tabs` | List all open browser tabs |
+| `attach_debugger` | Attach Chrome DevTools debugger to a tab |
+| `detach_debugger` | Detach the debugger from a tab |
+
+All tools support an optional `tabId` parameter to target a specific tab. See [API_REFERENCE.md](API_REFERENCE.md) for full parameter documentation.
+
+## Example Workflows
+
+### Debugging Console Errors
+
+Ask Claude Code: *"What errors are showing in the browser console?"*
+
+Claude Code will use `get_console_messages` to retrieve errors and warnings, then analyze them and suggest fixes.
+
+### Analyzing Failed API Calls
+
+Ask: *"Show me the failed network requests and help me debug them"*
+
+Claude Code uses `get_network_requests` with failed-only filtering to find 4xx/5xx responses, then inspects request/response bodies for clues.
+
+### Accessibility Audit
+
+Ask: *"Check this page for accessibility issues"*
+
+Claude Code calls `get_accessibility_tree` and `get_page_content` to analyze ARIA attributes, heading structure, alt text, and semantic HTML.
+
+### Performance Analysis
+
+Ask: *"How's the performance of this page? Any issues?"*
+
+Uses `get_performance_metrics` and `get_network_requests` to identify slow resources, large payloads, and Core Web Vitals issues.
+
+### Visual Inspection
+
+Ask: *"Take a screenshot of the current page"*
+
+`capture_screenshot` returns a PNG or JPEG snapshot of the visible tab.
+
+## Configuration
+
+### Server Port
+
+The server defaults to port **6009**. To use a different port:
+
+```bash
+MCP_SERVER_PORT=8080 npm start
+```
+
+If you change the port, update the extension's WebSocket URL in the popup (`ws://localhost:8080/ws`) and your Claude Code MCP configuration.
+
+### Extension Settings
+
+Click the extension icon to:
+- View connection status
+- Change the WebSocket server URL
+- Manually trigger data capture
+- View message statistics
+
+### Running with PM2 (Production)
+
+```bash
+# Start with PM2
+npm run pm2:start
+
+# Other PM2 commands
+npm run pm2:status    # Check status
+npm run pm2:logs      # View logs
+npm run pm2:restart   # Restart
+npm run pm2:stop      # Stop
+```
+
+See [PM2_GUIDE.md](PM2_GUIDE.md) for auto-start on boot and advanced configuration.
+
+### MCP Configuration for Other Clients
+
+For MCP clients that use JSON configuration:
 
 ```json
 {
   "mcpServers": {
     "browser-mcp": {
-      "command": "node",
-      "args": ["/path/to/browser-mcp/server/index.js"],
-      "env": {
-        "NODE_ENV": "production"
-      }
+      "url": "http://localhost:6009/mcp"
     }
   }
 }
 ```
 
-**macOS/Linux:**
-Edit `~/.config/claude-desktop/claude_desktop_config.json`
-
-**Windows:**
-Edit `%APPDATA%/Claude/claude_desktop_config.json`
-
-## Usage
-
-### 1. Start the MCP Server
-
-The server starts automatically when Claude Code launches, or manually:
-
-```bash
-cd server
-npm start
-```
-
-The server will:
-- Listen on port 3000 for WebSocket connections
-- Provide health check endpoint at `http://localhost:3000/health`
-- Connect to Claude Code via stdio
-
-### 2. Connect Browser Extension
-
-1. **Open the Extension Popup**
-   - Click the Browser MCP Bridge icon in your toolbar
-
-2. **Configure Connection**
-   - Server URL should default to `ws://localhost:3000/mcp`
-   - Click "Connect to Server"
-   - Status should change to "Connected"
-
-3. **Verify Connection**
-   - Green status indicator shows successful connection
-   - Extension will automatically reconnect if disconnected
-
-### 3. Use Claude Code Tools
-
-Once connected, Claude Code has access to these tools:
-
-#### Page Inspection Tools
-
-```bash
-# Get complete page content and metadata
-get_page_content
-
-# Get structured DOM snapshot
-get_dom_snapshot
-
-# Execute JavaScript in page context
-execute_javascript --code "document.title"
-
-# Capture screenshot
-capture_screenshot
-```
-
-#### Developer Tools
-
-```bash
-# Get console messages
-get_console_messages
-
-# Get network requests
-get_network_requests
-
-# Get performance metrics
-get_performance_metrics
-
-# Get accessibility tree
-get_accessibility_tree
-```
-
-#### Browser Management
-
-```bash
-# List all open tabs
-get_browser_tabs
-
-# Attach debugger for advanced inspection
-attach_debugger --tabId 123
-
-# Detach debugger
-detach_debugger --tabId 123
-```
-
-### 4. DevTools Panel
-
-1. **Open Chrome DevTools**
-   - Right-click on any page → "Inspect"
-   - Or press `F12`
-
-2. **Find MCP Bridge Panel**
-   - Look for "MCP Bridge" tab alongside Console, Network, etc.
-   - Click to open the custom panel
-
-3. **Use Panel Features**
-   - Quick capture buttons for different data types
-   - Real-time connection status
-   - Message logging and debugging
-   - Visual data display
-
-## Example Workflows
-
-### Web Development Debugging
-
-1. **Inspect Page Issues**
-   ```bash
-   # In Claude Code
-   "Analyze this page for accessibility issues"
-   # Uses get_accessibility_tree and get_page_content
-   ```
-
-2. **Performance Analysis**
-   ```bash
-   "Check this page's performance metrics and suggest optimizations"
-   # Uses get_performance_metrics and get_network_requests
-   ```
-
-3. **Console Error Analysis**
-   ```bash
-   "Review the console errors and help me fix them"
-   # Uses get_console_messages
-   ```
-
-### Automated Testing Support
-
-1. **Form Testing**
-   ```bash
-   execute_javascript --code "
-     const form = document.querySelector('form');
-     const inputs = form.querySelectorAll('input');
-     return Array.from(inputs).map(i => ({name: i.name, type: i.type}));
-   "
-   ```
-
-2. **Visual Regression**
-   ```bash
-   capture_screenshot
-   # Compare with baseline screenshots
-   ```
-
-### Content Analysis
-
-1. **SEO Analysis**
-   ```bash
-   get_page_content --includeMetadata true
-   # Analyze meta tags, headings, content structure
-   ```
-
-2. **Content Extraction**
-   ```bash
-   execute_javascript --code "
-     return Array.from(document.querySelectorAll('article')).map(a => a.innerText);
-   "
-   ```
-
-## Configuration
-
-### Extension Settings
-
-The extension popup allows you to:
-- Change WebSocket server URL
-- View connection statistics
-- Manually trigger data capture
-- Access DevTools panel
-
-### Server Configuration
-
-Environment variables:
-
-```bash
-# WebSocket port (default: 3000)
-PORT=3000
-
-# Enable debug logging
-DEBUG=true
-
-# Maximum message size (bytes)
-MAX_MESSAGE_SIZE=10485760
-```
-
-### Security Considerations
-
-- **Local Connection Only** - Server only accepts connections from localhost
-- **Same-Origin Policy** - Extension respects browser security policies
-- **No Password Storage** - No sensitive data is stored or transmitted
-- **Minimal Permissions** - Extension requests only necessary permissions
-
-## Troubleshooting
-
-### Extension Issues
-
-**Extension not loading:**
-```bash
-# Check browser console for errors
-# Verify all files are present in extension directory
-# Ensure manifest.json is valid
-```
-
-**Connection failures:**
-```bash
-# Verify MCP server is running on port 3000
-# Check WebSocket URL in extension popup
-# Look for firewall blocking localhost:3000
-```
-
-### Server Issues
-
-**Server won't start:**
-```bash
-# Check Node.js version (18.0.0+)
-npm list  # Verify dependencies installed
-node --version
-```
-
-**MCP connection fails:**
-```bash
-# Verify Claude Code configuration
-# Check server logs for errors
-# Ensure stdio communication is working
-```
-
-### Common Fixes
-
-1. **Restart Everything**
-   ```bash
-   # Stop Claude Code
-   # Kill server process
-   # Disable/re-enable extension
-   # Restart browser
-   # Start server and Claude Code
-   ```
-
-2. **Clear Extension Storage**
-   ```bash
-   # In Chrome: chrome://extensions/
-   # Find extension → Details → Extension options
-   # Clear stored data
-   ```
-
-3. **Reset Server Connection**
-   ```bash
-   cd server
-   npm run dev  # Use with --watch for debugging
-   ```
-
 ## Development
-
-### Extension Development
-
-```bash
-cd extension
-
-# Watch for changes (if using build tools)
-npm run dev
-
-# Test in browser
-# Make changes and reload extension
-```
 
 ### Server Development
 
 ```bash
-cd server
+npm run dev          # Start with --watch (auto-restart on changes)
+DEBUG=* npm start    # Verbose logging
+```
 
-# Development mode with auto-restart
-npm run dev
+### Extension Development
 
-# Debug mode with verbose logging
-DEBUG=* npm start
+1. Make changes to files in `extension/`
+2. Go to `chrome://extensions/`
+3. Click the reload button on the Browser MCP Bridge extension
+
+### Health Check
+
+```bash
+npm run health-check
+# or: curl http://localhost:6009/health
 ```
 
 ### Adding New Tools
 
-1. **Add tool definition** to server `ListToolsRequestSchema` handler
-2. **Implement tool logic** in server `CallToolRequestSchema` handler
-3. **Add browser-side handler** in extension background.js
-4. **Test with Claude Code**
+1. Add tool definition in `server.js` → `ListToolsRequestSchema` handler
+2. Implement tool logic in `server.js` → `CallToolRequestSchema` handler
+3. Add browser-side handler in `extension/background.js`
+4. Test with Claude Code
 
-## API Reference
+## Data Optimization
 
-### MCP Tools
+The server implements intelligent defaults to keep responses manageable for AI agents:
 
-| Tool | Description | Parameters |
-|------|-------------|------------|
-| `get_page_content` | Extract page HTML, text, metadata | `tabId?`, `includeMetadata?` |
-| `get_dom_snapshot` | Get structured DOM tree | `tabId?`, `maxDepth?`, `includeStyles?` |
-| `execute_javascript` | Run JS in page context | `tabId?`, `code` |
-| `get_console_messages` | Retrieve console logs | `tabId?`, `types?`, `limit?` |
-| `get_network_requests` | Get network activity | `tabId?`, `limit?` |
-| `capture_screenshot` | Take visual snapshot | `tabId?`, `format?`, `quality?` |
-| `get_performance_metrics` | Performance data | `tabId?` |
-| `get_accessibility_tree` | A11y tree structure | `tabId?` |
-| `get_browser_tabs` | List all tabs | None |
-| `attach_debugger` | Enable advanced inspection | `tabId` |
-| `detach_debugger` | Disable debugger | `tabId` |
+- **HTML**: Truncated at 50KB (text at 30KB)
+- **DOM**: Limited to 500 nodes, scripts/styles excluded
+- **Console**: Returns errors and warnings by default
+- **Network**: 50 requests, failed requests sorted first, bodies excluded
 
-### WebSocket Messages
+All limits are configurable per-request. See [DATA_OPTIMIZATION.md](DATA_OPTIMIZATION.md) for the full filtering, pagination, and optimization guide.
 
-The extension communicates with the server using structured WebSocket messages:
+## Troubleshooting
 
-```javascript
-// Page content data
-{
-  type: "browser-data",
-  source: "content-script",
-  tabId: 123,
-  url: "https://example.com",
-  data: { /* page content */ }
-}
+### Extension won't connect
 
-// Tool responses
-{
-  type: "response",
-  action: "getPageContent",
-  tabId: 123,
-  data: { /* response data */ }
-}
+1. Verify the server is running: `curl http://localhost:6009/health`
+2. Check the WebSocket URL in the extension popup matches the server port
+3. Look for errors in the browser console (`chrome://extensions/` → errors link)
 
-// Error messages
-{
-  type: "error",
-  action: "getPageContent",
-  tabId: 123,
-  error: "Error message"
-}
-```
+### Claude Code can't find the tools
+
+1. Verify MCP configuration: `claude mcp list`
+2. Check the server is running and healthy
+3. Re-add the server: `claude mcp remove browser-mcp && claude mcp add --scope user --transport http browser-mcp http://127.0.0.1:6009/mcp`
+
+### No data returned from tools
+
+1. Make sure the extension is connected (green status in popup)
+2. Navigate to a page in the browser — the extension needs an active page
+3. Check if the tab ID is correct (use `get_browser_tabs` first)
+
+### Server won't start
+
+1. Check Node.js version: `node --version` (requires 18.0.0+)
+2. Install dependencies: `npm run install-server`
+3. Check if port 6009 is in use: `lsof -i :6009`
+
+## Further Reading
+
+- [ARCHITECTURE.md](ARCHITECTURE.md) — System design, data flow, and component details
+- [API_REFERENCE.md](API_REFERENCE.md) — Complete MCP tools reference with all parameters
+- [DATA_OPTIMIZATION.md](DATA_OPTIMIZATION.md) — Filtering, pagination, and performance tuning
+
+## Requirements
+
+- Node.js 18.0.0+
+- Chrome, Edge, or Chromium-based browser
+- Claude Code CLI (or any MCP-compatible client)
 
 ## License
 
-MIT License - See LICENSE file for details.
-
-## Contributing
-
-1. Fork the repository
-2. Create feature branch
-3. Make changes with tests
-4. Submit pull request
-
-## Support
-
-For issues and questions:
-- Check troubleshooting section above
-- Review browser console and server logs
-- Create GitHub issue with detailed information
+MIT
