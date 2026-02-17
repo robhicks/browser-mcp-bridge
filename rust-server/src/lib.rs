@@ -4,6 +4,7 @@ pub mod server;
 pub mod tools;
 pub mod transport;
 pub mod types;
+pub mod utils;
 
 // Re-export the essential working types
 pub use config::ServerConfig;

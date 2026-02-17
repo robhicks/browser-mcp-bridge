@@ -1,3 +1,4 @@
+use crate::cache::BrowserDataCache;
 use crate::types::{errors::*, messages::*};
 use axum::extract::ws::{Message, WebSocket};
 use dashmap::DashMap;
@@ -17,6 +18,7 @@ pub struct ConnectionPool {
     health_monitor: Arc<HealthMonitor>,
     message_router: Arc<MessageRouter>,
     stats: Arc<ConnectionStats>,
+    data_cache: Option<Arc<BrowserDataCache>>,
 }
 
 pub struct WebSocketConnection {
@@ -55,7 +57,12 @@ impl ConnectionPool {
             health_monitor: Arc::new(HealthMonitor::new(check_interval, timeout_threshold)),
             message_router: Arc::new(MessageRouter::new(Duration::from_secs(30))),
             stats: Arc::new(ConnectionStats::default()),
+            data_cache: None,
         }
+    }
+
+    pub fn set_data_cache(&mut self, cache: Arc<BrowserDataCache>) {
+        self.data_cache = Some(cache);
     }
 
     // Efficient connection handling with minimal allocations
@@ -281,52 +288,111 @@ impl ConnectionPool {
                     }
                 }
             }
-            "heartbeat" => {
-                // Handle heartbeat/ping messages
-                tracing::debug!("Received heartbeat from {}", connection_id);
+            "heartbeat" | "ping" => {
+                tracing::debug!("Received {} from {}", message_type, connection_id);
 
-                // Send pong response if needed
                 if let Some(connection) = self.connections.get(&connection_id) {
                     let pong_response = serde_json::json!({
                         "type": "pong",
-                        "timestamp": chrono::Utc::now().to_rfc3339()
+                        "timestamp": chrono::Utc::now().timestamp_millis(),
+                        "originalTimestamp": message.get("timestamp")
                     });
                     let _ = connection.sender.send(Message::Text(pong_response.to_string()));
                 }
             }
             "response" => {
-                // Handle response messages to our requests
-                if let Some(request_id_value) = message.get("request_id") {
-                    if let Some(request_id_str) = request_id_value.as_str() {
-                        if let Ok(request_id) = uuid::Uuid::parse_str(request_id_str) {
-                            // Forward to message router for pending requests
-                            if let Some(result) = message.get("result") {
-                                tracing::debug!("Received response for request {}: {}", request_id, result);
-                                // The message router should handle this
-                            }
-                        }
+                // Handle response messages - extension uses camelCase "requestId" and "data" fields
+                if let Some(request_id_str) = message.get("requestId").and_then(|v| v.as_str()) {
+                    if let Ok(request_id) = uuid::Uuid::parse_str(request_id_str) {
+                        let data = message.get("data").cloned().unwrap_or(serde_json::Value::Null);
+                        tracing::debug!("Received response for request {}", request_id);
+                        let response = BrowserResponse::RawJson(data);
+                        self.message_router
+                            .handle_response(request_id, Ok(response))
+                            .await?;
                     }
                 }
             }
+            "error" => {
+                // Handle error responses from the extension
+                if let Some(request_id_str) = message.get("requestId").and_then(|v| v.as_str()) {
+                    if let Ok(request_id) = uuid::Uuid::parse_str(request_id_str) {
+                        let error_msg = message.get("error")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("Unknown browser error")
+                            .to_string();
+                        tracing::warn!("Received error for request {}: {}", request_id, error_msg);
+                        self.message_router
+                            .handle_response(request_id, Err(error_msg))
+                            .await?;
+                    }
+                }
+            }
+            "browser-data" => {
+                // Handle pushed browser data from extension
+                self.handle_browser_data_push(connection_id, &message).await;
+            }
             "connection" => {
-                // Legacy connection message - handle gracefully
-                tracing::debug!("Received legacy connection message from {}", connection_id);
-
-                // Extract any useful information
+                tracing::debug!("Received connection message from {}", connection_id);
                 if let Some(status) = message.get("status").and_then(|s| s.as_str()) {
                     if status == "connected" {
                         tracing::info!("Browser extension confirmed connection: {}", connection_id);
                     }
                 }
+                // Associate tab if provided
+                if let Some(tab_id) = message.get("tabId").and_then(|t| t.as_u64()) {
+                    self.associate_tab_with_connection(connection_id, tab_id as u32).await;
+                }
             }
             _ => {
-                // Log unknown message types but don't error - this is MCP compliant
                 tracing::debug!("Received unknown message type '{}' from {}: {}",
                     message_type, connection_id, message);
             }
         }
 
         Ok(())
+    }
+
+    async fn handle_browser_data_push(&self, connection_id: Uuid, message: &serde_json::Value) {
+        let tab_id = message.get("tabId").and_then(|v| v.as_u64()).map(|v| v as u32);
+        let source = message.get("source").and_then(|v| v.as_str()).unwrap_or("unknown");
+
+        tracing::debug!("Received browser-data from {} (source: {}, tab: {:?})", connection_id, source, tab_id);
+
+        // Associate tab with connection if we have a tab_id
+        if let Some(tab_id) = tab_id {
+            self.associate_tab_with_connection(connection_id, tab_id).await;
+        }
+
+        // Store data in cache if available
+        if let Some(cache) = &self.data_cache {
+            if let Some(tab_id) = tab_id {
+                match source {
+                    "content-script" => {
+                        if let Some(data) = message.get("data") {
+                            // Store page content if available
+                            if let Some(page_content) = data.get("pageContent") {
+                                let content = crate::types::browser::PageContent {
+                                    url: page_content.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                    title: page_content.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                    text: page_content.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                    html: page_content.get("html").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                    metadata: std::collections::HashMap::new(),
+                                    last_updated: std::time::SystemTime::now(),
+                                };
+                                cache.update_page_content(tab_id, content).await;
+                            }
+                        }
+                    }
+                    "devtools" | "debugger" => {
+                        tracing::debug!("Stored {} data for tab {}", source, tab_id);
+                    }
+                    _ => {
+                        tracing::debug!("Unknown browser-data source: {}", source);
+                    }
+                }
+            }
+        }
     }
 
     async fn associate_tab_with_connection(&self, connection_id: Uuid, tab_id: u32) {
@@ -365,10 +431,92 @@ impl ConnectionPool {
         Ok(sent_count)
     }
 
+    /// Build the flat camelCase JSON message the browser extension expects.
+    /// Format: { "action": "getPageContent", "requestId": "<uuid>", "tabId": 123, ...params }
+    fn build_request_json(request_id: &Uuid, request: &BrowserRequest, tab_id: Option<u32>) -> serde_json::Value {
+        let mut msg = match request {
+            BrowserRequest::GetPageContent { include_metadata } => {
+                serde_json::json!({ "action": "getPageContent", "includeMetadata": include_metadata })
+            }
+            BrowserRequest::GetDomSnapshot { max_depth, include_styles } => {
+                serde_json::json!({ "action": "getDOMSnapshot", "maxDepth": max_depth, "includeStyles": include_styles })
+            }
+            BrowserRequest::ExecuteJavaScript { code, .. } => {
+                serde_json::json!({ "action": "executeScript", "script": code })
+            }
+            BrowserRequest::GetConsoleMessages { level_filter, limit } => {
+                let mut m = serde_json::json!({ "action": "getConsoleMessages" });
+                if let Some(f) = level_filter { m["levelFilter"] = serde_json::Value::String(f.clone()); }
+                if let Some(l) = limit { m["limit"] = serde_json::json!(l); }
+                m
+            }
+            BrowserRequest::GetNetworkRequests { include_bodies, limit } => {
+                let mut m = serde_json::json!({ "action": "getNetworkData", "includeBodies": include_bodies });
+                if let Some(l) = limit { m["limit"] = serde_json::json!(l); }
+                m
+            }
+            BrowserRequest::CaptureScreenshot { format, quality, .. } => {
+                let mut m = serde_json::json!({ "action": "captureScreenshot", "format": format });
+                if let Some(q) = quality { m["quality"] = serde_json::json!(q); }
+                m
+            }
+            BrowserRequest::GetPerformanceMetrics => {
+                serde_json::json!({ "action": "getPerformanceMetrics" })
+            }
+            BrowserRequest::GetAccessibilityTree { max_depth } => {
+                let mut m = serde_json::json!({ "action": "getAccessibilityTree" });
+                if let Some(d) = max_depth { m["maxDepth"] = serde_json::json!(d); }
+                m
+            }
+            BrowserRequest::GetBrowserTabs => {
+                serde_json::json!({ "action": "getAllTabs" })
+            }
+            BrowserRequest::AttachDebugger => {
+                serde_json::json!({ "action": "attachDebugger" })
+            }
+            BrowserRequest::DetachDebugger => {
+                serde_json::json!({ "action": "detachDebugger" })
+            }
+        };
+
+        msg["requestId"] = serde_json::Value::String(request_id.to_string());
+        if let Some(tid) = tab_id {
+            msg["tabId"] = serde_json::json!(tid);
+        }
+        msg
+    }
+
+    /// Get timeout duration based on the action type
+    fn timeout_for_request(request: &BrowserRequest, custom_timeout: Option<Duration>) -> Duration {
+        if let Some(t) = custom_timeout {
+            return t;
+        }
+        match request {
+            BrowserRequest::GetAccessibilityTree { .. } => Duration::from_secs(30),
+            BrowserRequest::GetDomSnapshot { .. } => Duration::from_secs(20),
+            _ => Duration::from_secs(10),
+        }
+    }
+
     // Efficient request-response correlation
     pub async fn send_request(&self, tab_id: u32, request: BrowserRequest) -> Result<BrowserResponse> {
+        self.send_request_with_timeout(Some(tab_id), request, None).await
+    }
+
+    /// Send a request to any available connection (for global operations like getAllTabs)
+    pub async fn send_request_any(&self, request: BrowserRequest) -> Result<BrowserResponse> {
+        self.send_request_with_timeout(None, request, None).await
+    }
+
+    /// Send request with optional tab targeting and custom timeout
+    pub async fn send_request_with_timeout(
+        &self,
+        tab_id: Option<u32>,
+        request: BrowserRequest,
+        custom_timeout: Option<Duration>,
+    ) -> Result<BrowserResponse> {
         let request_id = Uuid::new_v4();
-        let timeout = self.message_router.request_timeout;
+        let timeout = Self::timeout_for_request(&request, custom_timeout);
 
         // Create response channel
         let (response_tx, response_rx) = oneshot::channel();
@@ -378,19 +526,23 @@ impl ConnectionPool {
             .register_pending_request(request_id, response_tx)
             .await;
 
-        // Find active connection for tab
-        let connection = self
-            .find_connection_for_tab(tab_id)
-            .ok_or_else(|| BrowserMcpError::ConnectionNotAvailable { tab_id })?;
-
-        // Send request
-        let message = BrowserMessage::Request {
-            request_id,
-            action: request,
-            tab_id: Some(tab_id),
+        // Find connection: either for specific tab or most recently active
+        let connection = if let Some(tid) = tab_id {
+            self.find_connection_for_tab(tid)
+                .or_else(|| self.find_most_recent_connection())
+        } else {
+            self.find_most_recent_connection()
         };
 
-        let serialized = serde_json::to_string(&message)?;
+        let connection = connection.ok_or_else(|| {
+            BrowserMcpError::ConnectionNotAvailable { tab_id: tab_id.unwrap_or(0) }
+        })?;
+
+        // Build flat camelCase JSON message
+        let msg = Self::build_request_json(&request_id, &request, tab_id);
+        let serialized = serde_json::to_string(&msg)?;
+
+        tracing::debug!("Sending request {} for action: {}", request_id, msg.get("action").and_then(|v| v.as_str()).unwrap_or("unknown"));
         connection.sender.send(Message::Text(serialized))?;
 
         // Wait for response with timeout
@@ -415,6 +567,27 @@ impl ConnectionPool {
             }
         }
         None
+    }
+
+    /// Find the most recently active connection (for global operations)
+    pub fn find_most_recent_connection(&self) -> Option<WebSocketConnection> {
+        self.connections
+            .iter()
+            .max_by_key(|entry| {
+                let connection = entry.value();
+                *connection.last_activity.read()
+            })
+            .map(|entry| {
+                let connection = entry.value();
+                WebSocketConnection {
+                    id: connection.id,
+                    sender: connection.sender.clone(),
+                    tab_id: connection.tab_id,
+                    connected_at: connection.connected_at,
+                    last_activity: connection.last_activity.clone(),
+                    remote_addr: connection.remote_addr,
+                }
+            })
     }
 
     pub async fn get_active_connections(&self) -> Vec<Uuid> {

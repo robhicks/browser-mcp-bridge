@@ -9,7 +9,7 @@ importers:
   .:
     dependencies:
       sharp:
-        specifier: ^0.34.3
+        specifier: ^0.34.4
         version: 0.34.4
 
 packages:

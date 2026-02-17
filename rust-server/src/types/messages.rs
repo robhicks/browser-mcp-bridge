@@ -113,6 +113,9 @@ pub enum BrowserResponse {
 
     #[serde(rename = "error")]
     Error { message: String },
+
+    #[serde(rename = "raw_json")]
+    RawJson(serde_json::Value),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
