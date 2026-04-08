@@ -73,8 +73,11 @@ browser-mcp-bridge/
 │   ├── src/                   # Rust source code
 │   ├── Cargo.toml             # Rust dependencies
 │   └── config.toml            # Server configuration
-├── ecosystem.config.cjs       # PM2 process manager config
-├── ARCHITECTURE.md            # System architecture documentation
+├── browser-mcp-rust-server.service  # systemd user service unit
+├── install-rust-service.sh          # Service install/uninstall script
+├── start-rust-server.sh             # PM2 launch script for Rust server
+├── ecosystem.config.cjs             # PM2 process manager config
+├── ARCHITECTURE.md                  # System architecture documentation
 ├── API_REFERENCE.md           # Complete MCP tools reference
 ├── DATA_OPTIMIZATION.md       # Data filtering and pagination guide
 └── package.json               # Root scripts and orchestration
@@ -182,6 +185,78 @@ npm run pm2:stop      # Stop
 ```
 
 See [PM2_GUIDE.md](PM2_GUIDE.md) for auto-start on boot and advanced configuration.
+
+### Running the Rust Server with systemd (Linux)
+
+The Rust server can be managed as a systemd user service for automatic startup and process supervision.
+
+**Quick setup:**
+
+```bash
+# Build and install the service in one step
+./install-rust-service.sh
+
+# Or install without rebuilding (if you already have a release binary)
+./install-rust-service.sh --no-build
+```
+
+**Managing the service:**
+
+```bash
+systemctl --user status browser-mcp-rust-server     # Check status
+journalctl --user -u browser-mcp-rust-server -f      # Follow logs
+systemctl --user restart browser-mcp-rust-server     # Restart
+systemctl --user stop browser-mcp-rust-server        # Stop
+```
+
+The service auto-starts on login. To start it even without a login session (useful for headless/SSH access):
+
+```bash
+loginctl enable-linger $USER
+```
+
+**Uninstall:**
+
+```bash
+./install-rust-service.sh --uninstall
+```
+
+**Manual installation** (if you prefer not to use the script):
+
+```bash
+# Build the release binary
+cd rust-server && cargo build --release
+
+# Copy the service file
+mkdir -p ~/.config/systemd/user
+cp browser-mcp-rust-server.service ~/.config/systemd/user/
+
+# If your repo is NOT at ~/dev/browser-mcp-bridge, edit the paths:
+#   systemctl --user edit browser-mcp-rust-server
+# and override ExecStart and WorkingDirectory
+
+# Enable and start
+systemctl --user daemon-reload
+systemctl --user enable --now browser-mcp-rust-server
+```
+
+**Configuration:**
+
+The service reads `rust-server/config.toml` by default. To change the port or other settings, edit `config.toml` and restart:
+
+```bash
+systemctl --user restart browser-mcp-rust-server
+```
+
+Set `RUST_LOG` for log verbosity. The default is `info`. Override it with a drop-in:
+
+```bash
+systemctl --user edit browser-mcp-rust-server
+```
+```ini
+[Service]
+Environment=RUST_LOG=debug
+```
 
 ### MCP Configuration for Other Clients
 
